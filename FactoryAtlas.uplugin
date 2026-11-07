@@ -1,0 +1,35 @@
+{
+	"FileVersion": 3,
+	"Version": 0,
+	"VersionName": "0.1.0",
+	"FriendlyName": "Atlas",
+	"Description": "A much better map. Every building is drawn live on the in-game map with layers, a height filter, paint colors, hover info and image export, at almost no cost to the game.",
+	"Category": "Modding",
+	"CreatedBy": "leanwrldd",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": true,
+	"Installed": false,
+	"BuiltInInitialFeatureState": "Active",
+	"Modules": [
+		{
+			"Name": "FactoryAtlas",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "SML",
+			"Enabled": true,
+			"SemVersion": "^3.12.0"
+		}
+	],
+	"SemVersion": "0.1.0",
+	"GameVersion": ">=491125",
+	"RequiredOnRemote": false
+}
