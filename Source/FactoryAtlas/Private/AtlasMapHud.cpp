@@ -2,7 +2,21 @@
 
 #include "AtlasSubsystem.h"
 #include "FactoryAtlas.h"
+#include "Blueprint/WidgetTree.h"
 #include "Brushes/SlateColorBrush.h"
+#include "Components/BorderSlot.h"
+#include "Components/CanvasPanelSlot.h"
+#include "Components/HorizontalBoxSlot.h"
+#include "Components/OverlaySlot.h"
+#include "Components/SizeBox.h"
+#include "Components/SizeBoxSlot.h"
+#include "Components/VerticalBoxSlot.h"
+#include "Components/WidgetSwitcher.h"
+#include "Containers/Ticker.h"
+#include "Components/GridSlot.h"
+#include "Components/SafeZoneSlot.h"
+#include "Blueprint/GameViewportSubsystem.h"
+#include "Engine/GameViewportClient.h"
 #include "Brushes/SlateRoundedBoxBrush.h"
 #include "Engine/Engine.h"
 #include "Fonts/CompositeFont.h"
@@ -15,14 +29,18 @@
 #include "Styling/SlateTypes.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SEditableText.h"
 #include "Widgets/Input/SSlider.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/Layout/SWrapBox.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/SLeafWidget.h"
 #include "Widgets/SOverlay.h"
+#include "Widgets/SToolTip.h"
+#include "Widgets/Layout/SUniformGridPanel.h"
 #include "Widgets/Text/STextBlock.h"
 
 using namespace Atlas;
@@ -56,6 +74,11 @@ namespace
 		FSlateRoundedBoxBrush ToggleOff{ RowColor, 2.f };
 		FSlateRoundedBoxBrush SliderThumb{ Accent, 2.f };
 		FSlateRoundedBoxBrush Dot{ FLinearColor::White, 4.f };
+		// Tooltips, in the look of the game's key hints: a dark tile with an orange key chip.
+		FSlateRoundedBoxBrush Tip{ FLinearColor(FColor(22, 23, 26, 225)), 2.f };
+		FSlateRoundedBoxBrush KeyChip{ Accent, 2.f };
+		FSlateColorBrush TextSelection{ FLinearColor(Accent.R, Accent.G, Accent.B, 0.45f) };
+		FEditableTextStyle TextInput;
 
 		FButtonStyle Flat;
 		FButtonStyle Tinted;
@@ -94,6 +117,9 @@ namespace
 			Slider.HoveredThumbImage.ImageSize = FVector2f(8.f, 14.f);
 			Slider.DisabledThumbImage.ImageSize = FVector2f(8.f, 14.f);
 
+			TextInput.SetFont(Font).SetColorAndOpacity(FSlateColor(TextMain))
+				.SetBackgroundImageSelected(TextSelection).SetBackgroundImageComposing(TextSelection).SetCaretImage(White);
+
 			Scroll.SetTopShadowBrush(FSlateNoResource()).SetBottomShadowBrush(FSlateNoResource())
 				.SetLeftShadowBrush(FSlateNoResource()).SetRightShadowBrush(FSlateNoResource());
 		}
@@ -109,6 +135,75 @@ namespace
 	UAtlasSubsystem* Sub()
 	{
 		return UAtlasSubsystem::GetActive();
+	}
+
+	/** A plain tooltip as a dark tile, instead of Slate's stock look. */
+	TSharedPtr<IToolTip> MakeTip(const FText& Text)
+	{
+		if (Text.IsEmpty())
+		{
+			return nullptr; // A custom tooltip would show as an empty tile
+		}
+		const FAtlasStyle& Style = FAtlasStyle::Get();
+		return SNew(SToolTip)
+			.BorderImage(&Style.Clear)
+			.TextMargin(FMargin(0.f))
+			[
+				SNew(SBorder)
+				.BorderImage(&Style.Tip)
+				.Padding(FMargin(10.f, 6.f))
+				[
+					SNew(STextBlock).Font(Style.Font).ColorAndOpacity(FSlateColor(TextMain)).WrapTextAt(300.f).Text(Text)
+				]
+			];
+	}
+
+	/** The map's mouse shortcuts, each a tile with its action over an orange key chip. */
+	TSharedPtr<IToolTip> MakeShortcutsTip()
+	{
+		const FAtlasStyle& Style = FAtlasStyle::Get();
+		static const TCHAR* const Shortcuts[][2] = {
+			{ TEXT("Open Settings"), TEXT("LMB") },
+			{ TEXT("Copy Settings"), TEXT("Ctrl + RMB") },
+			{ TEXT("Paste Settings"), TEXT("Ctrl + LMB") },
+			{ TEXT("Paste Along"), TEXT("Ctrl + Drag LMB") },
+			{ TEXT("Close Settings"), TEXT("LMB Empty Map") },
+			{ TEXT("Zoom"), TEXT("Scroll") },
+		};
+		constexpr int32 Columns = 3;
+
+		const TSharedRef<SUniformGridPanel> Grid = SNew(SUniformGridPanel).SlotPadding(FMargin(2.f));
+		for (int32 i = 0; i < UE_ARRAY_COUNT(Shortcuts); i++)
+		{
+			Grid->AddSlot(i % Columns, i / Columns)
+			[
+				SNew(SBorder)
+				.BorderImage(&Style.Tip)
+				.Padding(FMargin(12.f, 6.f, 12.f, 5.f))
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+					[
+						SNew(STextBlock).Font(Style.FontBold).ColorAndOpacity(FSlateColor(TextMain)).Text(FText::FromString(Shortcuts[i][0]))
+					]
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+					[
+						SNew(SBorder)
+						.BorderImage(&Style.KeyChip)
+						.Padding(FMargin(6.f, 0.f))
+						[
+							SNew(STextBlock).Font(Style.FontSmall).ColorAndOpacity(FSlateColor(FLinearColor::White)).Text(FText::FromString(Shortcuts[i][1]))
+						]
+					]
+				]
+			];
+		}
+		return SNew(SToolTip)
+			.BorderImage(&Style.Clear)
+			.TextMargin(FMargin(0.f))
+			[
+				Grid
+			];
 	}
 
 	/**
@@ -322,6 +417,222 @@ namespace
 		float High = 1.f;
 		bool bDraggingLow = true;
 	};
+
+	// The game stores colors linear; people pick them in sRGB, so the picker's hue, saturation and value are sRGB.
+	FVector3f ToHsv(const FLinearColor& Linear)
+	{
+		const FColor Srgb = Linear.ToFColorSRGB();
+		const FLinearColor Hsv = FLinearColor(Srgb.R / 255.f, Srgb.G / 255.f, Srgb.B / 255.f).LinearRGBToHSV();
+		return FVector3f(Hsv.R, Hsv.G, Hsv.B);
+	}
+
+	FLinearColor FromHsv(const FVector3f& Hsv)
+	{
+		const FLinearColor Rgb = FLinearColor(Hsv.X, Hsv.Y, Hsv.Z).HSVToLinearRGB();
+		return FLinearColor::FromSRGBColor(FColor(uint8(FMath::RoundToInt32(FMath::Clamp(Rgb.R, 0.f, 1.f) * 255.f)),
+			uint8(FMath::RoundToInt32(FMath::Clamp(Rgb.G, 0.f, 1.f) * 255.f)), uint8(FMath::RoundToInt32(FMath::Clamp(Rgb.B, 0.f, 1.f) * 255.f))));
+	}
+
+	FString ToHex(const FLinearColor& Linear)
+	{
+		const FColor Srgb = Linear.ToFColorSRGB();
+		return FString::Printf(TEXT("%02X%02X%02X"), Srgb.R, Srgb.G, Srgb.B);
+	}
+
+	/** "#FF8800" or "ff8800". FColor::FromHex alone accepts malformed text, so this checks first. */
+	bool FromHex(const FString& Text, FLinearColor& Out)
+	{
+		FString Hex = Text.TrimStartAndEnd();
+		Hex.RemoveFromStart(TEXT("#"));
+		if (Hex.Len() != 6)
+		{
+			return false;
+		}
+		for (const TCHAR Ch : Hex)
+		{
+			if (!FChar::IsHexDigit(Ch))
+			{
+				return false;
+			}
+		}
+		Out = FLinearColor::FromSRGBColor(FColor::FromHex(Hex));
+		return true;
+	}
+
+	/** The six-stop hue rainbow, left to right across Size. */
+	void PaintHue(FSlateWindowElementList& Elements, int32 Layer, const FGeometry& Geometry, const FVector2f& Position, const FVector2f& Size)
+	{
+		TArray<FSlateGradientStop> Stops;
+		for (int32 i = 0; i <= 6; i++)
+		{
+			// 359.9 rather than 360 for the last stop: HSVToLinearRGB expects hues below 360.
+			Stops.Add(FSlateGradientStop(FVector2f(Size.X * i / 6.f, 0.f), FLinearColor(FMath::Min(i * 60.f, 359.9f), 1.f, 1.f).HSVToLinearRGB()));
+		}
+		// Orient_Vertical: the stops run along X, so the bands are vertical.
+		FSlateDrawElement::MakeGradient(Elements, Layer, Geometry.ToPaintGeometry(Size, FSlateLayoutTransform(Position)), MoveTemp(Stops), Orient_Vertical);
+	}
+
+	/** A small rainbow square, the face of the "custom color" choice. */
+	class SAtlasHueChip : public SLeafWidget
+	{
+	public:
+		SLATE_BEGIN_ARGS(SAtlasHueChip) {}
+		SLATE_END_ARGS()
+
+		void Construct(const FArguments&) {}
+
+		virtual FVector2D ComputeDesiredSize(float) const override { return FVector2D(22.0, 22.0); }
+
+		virtual int32 OnPaint(const FPaintArgs&, const FGeometry& Geometry, const FSlateRect&, FSlateWindowElementList& Elements,
+			int32 LayerId, const FWidgetStyle&, bool) const override
+		{
+			const FVector2f Size(Geometry.GetLocalSize());
+			PaintHue(Elements, LayerId, Geometry, FVector2f::ZeroVector, Size);
+			// Fades to white at the top, as a hint that any shade can be picked.
+			TArray<FSlateGradientStop> Fade = { FSlateGradientStop(FVector2f(0.f, 0.f), FLinearColor(1.f, 1.f, 1.f, 0.8f)),
+				FSlateGradientStop(FVector2f(0.f, Size.Y), FLinearColor(1.f, 1.f, 1.f, 0.f)) };
+			FSlateDrawElement::MakeGradient(Elements, LayerId + 1, Geometry.ToPaintGeometry(Size, FSlateLayoutTransform()), MoveTemp(Fade), Orient_Horizontal);
+			return LayerId + 1;
+		}
+	};
+
+	/**
+	 * Saturation across and brightness down in a square of the current hue, with the hue bar beneath it.
+	 * Reports every change while dragging and commits once on release, so the building is repainted once per drag.
+	 */
+	class SAtlasColorField : public SLeafWidget
+	{
+	public:
+		DECLARE_DELEGATE_OneParam(FOnColor, FLinearColor);
+
+		SLATE_BEGIN_ARGS(SAtlasColorField) {}
+			SLATE_ATTRIBUTE(FLinearColor, Color)
+			SLATE_EVENT(FOnColor, OnChanged)
+			SLATE_EVENT(FSimpleDelegate, OnCommitted)
+		SLATE_END_ARGS()
+
+		void Construct(const FArguments& InArgs)
+		{
+			Color = InArgs._Color;
+			OnChanged = InArgs._OnChanged;
+			OnCommitted = InArgs._OnCommitted;
+		}
+
+		bool IsDragging() const { return HasMouseCapture(); }
+
+		virtual FVector2D ComputeDesiredSize(float) const override
+		{
+			return FVector2D(200.0, SquareHeight + Gap + HueHeight);
+		}
+
+		virtual void Tick(const FGeometry& Geometry, const double CurrentTime, const float DeltaTime) override
+		{
+			if (HasMouseCapture())
+			{
+				return;
+			}
+			// A grey has no hue, so keep the last one rather than jumping back to red.
+			const FVector3f Now = ToHsv(Color.Get());
+			Hsv = FVector3f(Now.Y > 0.001f && Now.Z > 0.001f ? Now.X : Hsv.X, Now.Y, Now.Z);
+		}
+
+		virtual int32 OnPaint(const FPaintArgs&, const FGeometry& Geometry, const FSlateRect&, FSlateWindowElementList& Elements,
+			int32 LayerId, const FWidgetStyle&, bool bParentEnabled) const override
+		{
+			const FAtlasStyle& Style = FAtlasStyle::Get();
+			const float Width = float(Geometry.GetLocalSize().X);
+			const FVector2f Square(Width, SquareHeight);
+			const auto Box = [&](int32 Layer, const FVector2f& Position, const FVector2f& Size, const FLinearColor& Tint)
+			{
+				FSlateDrawElement::MakeBox(Elements, Layer, Geometry.ToPaintGeometry(Size, FSlateLayoutTransform(Position)), &Style.White, ESlateDrawEffect::None, Tint);
+			};
+
+			// The hue at full strength, washed to white towards the left and darkened to black towards the bottom.
+			Box(LayerId, FVector2f::ZeroVector, Square, FLinearColor(Hsv.X, 1.f, 1.f).HSVToLinearRGB());
+			TArray<FSlateGradientStop> ToWhite = { FSlateGradientStop(FVector2f(0.f, 0.f), FLinearColor::White),
+				FSlateGradientStop(FVector2f(Width, 0.f), FLinearColor(1.f, 1.f, 1.f, 0.f)) };
+			FSlateDrawElement::MakeGradient(Elements, LayerId + 1, Geometry.ToPaintGeometry(Square, FSlateLayoutTransform()), MoveTemp(ToWhite), Orient_Vertical);
+			TArray<FSlateGradientStop> ToBlack = { FSlateGradientStop(FVector2f(0.f, 0.f), FLinearColor(0.f, 0.f, 0.f, 0.f)),
+				FSlateGradientStop(FVector2f(0.f, SquareHeight), FLinearColor::Black) };
+			FSlateDrawElement::MakeGradient(Elements, LayerId + 2, Geometry.ToPaintGeometry(Square, FSlateLayoutTransform()), MoveTemp(ToBlack), Orient_Horizontal);
+
+			const float HueY = SquareHeight + Gap;
+			PaintHue(Elements, LayerId, Geometry, FVector2f(0.f, HueY), FVector2f(Width, HueHeight));
+
+			// Markers: a ring at the picked shade, a line at the picked hue.
+			const FVector2f Spot(Hsv.Y * Width, (1.f - Hsv.Z) * SquareHeight);
+			Box(LayerId + 3, Spot - FVector2f(5.f), FVector2f(10.f), FLinearColor::White);
+			Box(LayerId + 4, Spot - FVector2f(3.f), FVector2f(6.f), FromHsv(Hsv));
+			const float HueX = Hsv.X / 360.f * Width;
+			Box(LayerId + 3, FVector2f(HueX - 2.f, HueY - 2.f), FVector2f(4.f, HueHeight + 4.f), FLinearColor::White);
+
+			if (!bParentEnabled)
+			{
+				Box(LayerId + 5, FVector2f::ZeroVector, FVector2f(Geometry.GetLocalSize()), FLinearColor(BodyColor.R, BodyColor.G, BodyColor.B, 0.6f));
+			}
+			return LayerId + 5;
+		}
+
+		virtual FReply OnMouseButtonDown(const FGeometry& Geometry, const FPointerEvent& Event) override
+		{
+			if (Event.GetEffectingButton() != EKeys::LeftMouseButton)
+			{
+				return FReply::Unhandled();
+			}
+			const FVector2f Local(Geometry.AbsoluteToLocal(Event.GetScreenSpacePosition()));
+			bDraggingHue = Local.Y > SquareHeight + Gap * 0.5f;
+			Drag(Geometry, Event);
+			return KeepFocus(FReply::Handled().CaptureMouse(SharedThis(this)), Event);
+		}
+
+		virtual FReply OnMouseMove(const FGeometry& Geometry, const FPointerEvent& Event) override
+		{
+			if (!HasMouseCapture())
+			{
+				return FReply::Unhandled();
+			}
+			Drag(Geometry, Event);
+			return FReply::Handled();
+		}
+
+		virtual FReply OnMouseButtonUp(const FGeometry&, const FPointerEvent&) override
+		{
+			if (!HasMouseCapture())
+			{
+				return FReply::Unhandled();
+			}
+			OnCommitted.ExecuteIfBound();
+			return FReply::Handled().ReleaseMouseCapture();
+		}
+
+	private:
+		static constexpr float SquareHeight = 96.f;
+		static constexpr float Gap = 6.f;
+		static constexpr float HueHeight = 12.f;
+
+		void Drag(const FGeometry& Geometry, const FPointerEvent& Event)
+		{
+			const FVector2f Local(Geometry.AbsoluteToLocal(Event.GetScreenSpacePosition()));
+			const float Across = FMath::Clamp(Local.X / FMath::Max(float(Geometry.GetLocalSize().X), 1.f), 0.f, 1.f);
+			if (bDraggingHue)
+			{
+				Hsv.X = FMath::Min(Across * 360.f, 359.9f);
+			}
+			else
+			{
+				Hsv.Y = Across;
+				Hsv.Z = 1.f - FMath::Clamp(Local.Y / SquareHeight, 0.f, 1.f);
+			}
+			Invalidate(EInvalidateWidgetReason::Paint);
+			OnChanged.ExecuteIfBound(FromHsv(Hsv));
+		}
+
+		TAttribute<FLinearColor> Color;
+		FOnColor OnChanged;
+		FSimpleDelegate OnCommitted;
+		FVector3f Hsv = FVector3f(0.f, 0.f, 1.f);
+		bool bDraggingHue = false;
+	};
 }
 
 class SAtlasHud : public SCompoundWidget
@@ -329,6 +640,9 @@ class SAtlasHud : public SCompoundWidget
 public:
 	SLATE_BEGIN_ARGS(SAtlasHud) {}
 	SLATE_END_ARGS()
+
+	/** The UMG widget hosting this one, which owns the map screen changes fullscreen makes. */
+	TWeakObjectPtr<UAtlasMapHud> Owner;
 
 	void Construct(const FArguments& InArgs)
 	{
@@ -344,27 +658,26 @@ public:
 			.VAlign(VAlign_Top)
 			.Padding(FMargin(0.f, 6.f, 12.f, 0.f))
 			[
-				SNew(SVerticalBox)
-				.Visibility(EVisibility::SelfHitTestInvisible)
-				+ SVerticalBox::Slot().AutoHeight()
+				SAssignNew(Panel, SAtlasPanelBorder)
+				.BorderImage(&Style.Body)
+				.Padding(FMargin(0.f))
 				[
-					SAssignNew(Panel, SAtlasPanelBorder)
-					.BorderImage(&Style.Body)
-					.Padding(FMargin(0.f))
+					SNew(SBox)
+					.WidthOverride(290.f)
 					[
-						SNew(SBox)
-						.WidthOverride(290.f)
-						[
-							SNew(SVerticalBox)
-							+ SVerticalBox::Slot().AutoHeight()[MakeHeader()]
-							+ SVerticalBox::Slot().AutoHeight()[MakeBody()]
-						]
+						SNew(SVerticalBox)
+						+ SVerticalBox::Slot().AutoHeight()[MakeHeader()]
+						+ SVerticalBox::Slot().AutoHeight()[MakeBody()]
 					]
 				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
-				[
-					MakeSelectionPanel()
-				]
+			]
+			// Placed over the selected building each frame; see PlaceSelectionPanel.
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Left)
+			.VAlign(VAlign_Top)
+			.Padding(TAttribute<FMargin>::CreateLambda([this]() { return FMargin(SelectionOffset.X, SelectionOffset.Y, 0.f, 0.f); }))
+			[
+				MakeSelectionPanel()
 			]
 		];
 	}
@@ -385,6 +698,85 @@ public:
 		bRecipePicker = false;
 	}
 
+	/**
+	 * Ctrl+right click (bCopy) or Ctrl+left click on the map: copies from, or pastes onto, the building under the
+	 * cursor without opening its panel; a toast by the cursor says what happened. False when there is no
+	 * building there to use, so the click goes on to the map as usual.
+	 */
+	bool OnMapClipboardClick(const FVector2f& ScreenPosition, bool bCopy)
+	{
+		UAtlasSubsystem* Atlas = Sub();
+		if (!Atlas || Atlas->IsPointerOverPanel() || !Atlas->IsPointOnMap(ScreenPosition))
+		{
+			return false;
+		}
+		if (bCopy)
+		{
+			if (!Atlas->CopyHovered())
+			{
+				return false;
+			}
+			PlayResultSound(*Atlas, EClipboardSound::Copy);
+			return true;
+		}
+		DragPasted.Reset();
+		if (!Atlas->PasteHovered(&DragPasted))
+		{
+			return false;
+		}
+		PlayResultSound(*Atlas, EClipboardSound::Paste);
+		// Starts a drag-paste: holding the button and moving on pastes onto each building passed over.
+		LastDragSource = Atlas->GetHover().Source;
+		Atlas->SetHoverEveryFrame(true);
+		return true;
+	}
+
+	/** While a Ctrl+left press that pasted is held: paste onto each further building under the cursor, once. */
+	void OnMapDragPaste(const FVector2f& ScreenPosition)
+	{
+		UAtlasSubsystem* Atlas = Sub();
+		if (!Atlas || Atlas->IsPointerOverPanel() || !Atlas->IsPointOnMap(ScreenPosition))
+		{
+			return;
+		}
+		// Selecting rebuilds the panel's lists, so only a change of hovered building is worth looking at.
+		const FHover& Hover = Atlas->GetHover();
+		if (!Hover.bValid || Hover.bMarker || Hover.Source == LastDragSource)
+		{
+			return;
+		}
+		LastDragSource = Hover.Source;
+		// A belt or a long wall is several shapes on the map but one building; PasteHovered skips what Done holds.
+		FText Text;
+		bool bError = false;
+		float Alpha = 0.f;
+		// Buildings that can't take the paste stay quiet here: a drag crosses plenty of them.
+		if (Atlas->PasteHovered(&DragPasted) && Atlas->GetToast(Text, bError, Alpha) && !bError)
+		{
+			Atlas->ShowToast(FText::FromString(FString::Printf(TEXT("Pasted onto %d buildings."), DragPasted.Num())));
+			Atlas->PlayClipboardSound(EClipboardSound::Paste);
+		}
+	}
+
+	/** After a Ctrl-click acted: its own sound, or the error sound when the toast it left says it failed. */
+	static void PlayResultSound(UAtlasSubsystem& Atlas, EClipboardSound Success)
+	{
+		FText Text;
+		bool bError = false;
+		float Alpha = 0.f;
+		Atlas.PlayClipboardSound(Atlas.GetToast(Text, bError, Alpha) && bError ? EClipboardSound::Error : Success);
+	}
+
+	void EndDragPaste()
+	{
+		DragPasted.Reset();
+		LastDragSource = FVector4f::Zero();
+		if (UAtlasSubsystem* Atlas = Sub())
+		{
+			Atlas->SetHoverEveryFrame(false);
+		}
+	}
+
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override
 	{
 		SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
@@ -395,6 +787,11 @@ public:
 			return;
 		}
 
+		if (UAtlasMapHud* Host = Owner.Get())
+		{
+			Host->UpdateFullscreen(Atlas->IsFullscreen());
+		}
+
 		// Measured from the panels' shapes, because a pressed button changes which widgets count as hovered.
 		const FVector2D Cursor = FSlateApplication::Get().GetCursorPos();
 		const bool bOverPanel = (Panel.IsValid() && Panel->GetTickSpaceGeometry().IsUnderLocation(Cursor))
@@ -403,6 +800,24 @@ public:
 
 		// Read once a frame; every line of the configure panel shows a piece of it.
 		State = Atlas->GetSelectionState();
+		Custom = Atlas->GetCustomizeState();
+		if (BuiltSelectionVersion != Atlas->GetSelectionVersion())
+		{
+			BuiltSelectionVersion = Atlas->GetSelectionVersion();
+			RebuildCustomizeLists(*Atlas);
+		}
+		SyncDraft(*Atlas);
+		bCanPaste = State.bValid && Atlas->CanPasteToSelected();
+		Controls = Atlas->GetControls();
+		if (Controls.LightColors.Num() != BuiltLightSlots && Controls.bHasLight)
+		{
+			BuiltLightSlots = Controls.LightColors.Num();
+			RebuildLightColors();
+		}
+		if (State.bValid)
+		{
+			PlaceSelectionPanel(AllottedGeometry, *Atlas);
+		}
 
 		if (Atlas->ConsumeMenuDirty() || bListDirty)
 		{
@@ -415,7 +830,43 @@ public:
 		FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override
 	{
 		const int32 Layer = SCompoundWidget::OnPaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
+		const int32 LabelLayer = PaintHoverLabel(AllottedGeometry, OutDrawElements, Layer);
+		return PaintToast(AllottedGeometry, OutDrawElements, LabelLayer);
+	}
 
+	/** What a Ctrl-click copy or paste did, just above the cursor, fading out after a moment. */
+	int32 PaintToast(const FGeometry& AllottedGeometry, FSlateWindowElementList& OutDrawElements, int32 Layer) const
+	{
+		const UAtlasSubsystem* Atlas = Sub();
+		FText Text;
+		bool bError = false;
+		float Alpha = 0.f;
+		if (!Atlas || !Atlas->GetToast(Text, bError, Alpha))
+		{
+			return Layer;
+		}
+		const FAtlasStyle& Style = FAtlasStyle::Get();
+		const FString String = Text.ToString();
+		const FVector2f Padding(8.f, 4.f);
+		const FVector2f TextSize(FSlateApplication::Get().GetRenderer()->GetFontMeasureService()->Measure(String, Style.Font));
+		const FVector2f BoxSize = TextSize + Padding * 2.f;
+		const FVector2f LocalSize(AllottedGeometry.GetLocalSize());
+		FVector2f Position = FVector2f(AllottedGeometry.AbsoluteToLocal(FSlateApplication::Get().GetCursorPos())) + FVector2f(16.f, -BoxSize.Y - 10.f);
+		Position.X = FMath::Clamp(Position.X, 4.f, FMath::Max(4.f, LocalSize.X - BoxSize.X - 4.f));
+		Position.Y = FMath::Clamp(Position.Y, 4.f, FMath::Max(4.f, LocalSize.Y - BoxSize.Y - 4.f));
+
+		const FLinearColor Edge = bError ? FLinearColor(FColor(235, 90, 80)) : Accent;
+		FSlateDrawElement::MakeBox(OutDrawElements, Layer + 1, AllottedGeometry.ToPaintGeometry(BoxSize, FSlateLayoutTransform(Position)),
+			&Style.White, ESlateDrawEffect::None, BodyColor.CopyWithNewOpacity(BodyColor.A * Alpha));
+		FSlateDrawElement::MakeBox(OutDrawElements, Layer + 2, AllottedGeometry.ToPaintGeometry(FVector2f(3.f, BoxSize.Y), FSlateLayoutTransform(Position)),
+			&Style.White, ESlateDrawEffect::None, Edge.CopyWithNewOpacity(Alpha));
+		FSlateDrawElement::MakeText(OutDrawElements, Layer + 3, AllottedGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(Position + Padding)),
+			String, Style.Font, ESlateDrawEffect::None, TextMain.CopyWithNewOpacity(Alpha));
+		return Layer + 3;
+	}
+
+	int32 PaintHoverLabel(const FGeometry& AllottedGeometry, FSlateWindowElementList& OutDrawElements, int32 Layer) const
+	{
 		const UAtlasSubsystem* Atlas = Sub();
 		if (!Atlas || !Atlas->GetSettings().bHoverLabel || !Atlas->GetHover().bValid || Atlas->GetHoverName().IsEmpty())
 		{
@@ -477,6 +928,37 @@ public:
 	}
 
 private:
+	/** Centres the configure panel just above the selected building, or below it when there is no room, kept on screen. */
+	void PlaceSelectionPanel(const FGeometry& Geometry, const UAtlasSubsystem& Atlas)
+	{
+		if (!SelectionPanel.IsValid())
+		{
+			return;
+		}
+		constexpr float Gap = 10.f;
+		constexpr float Edge = 4.f;
+
+		// The anchor is in window pixels; the panel is laid out in this widget's units.
+		const FSlateRenderTransform ToLocal = Geometry.GetAccumulatedRenderTransform().Inverse();
+		const FVector2f Anchor = ToLocal.TransformPoint(Atlas.GetSelectionAnchor());
+		const float Reach = ToLocal.TransformVector(FVector2f(Atlas.GetSelectionAnchorRadius(), 0.f)).Size();
+		// Measured now, not last frame: a freshly opened or rebuilt panel would otherwise be placed by its old
+		// size for one frame, then jump, which shows as a flash on every click.
+		SelectionPanel->SlatePrepass(GetPrepassLayoutScaleMultiplier());
+		const FVector2f PanelSize(SelectionPanel->GetDesiredSize());
+		const FVector2f Bounds(Geometry.GetLocalSize());
+
+		float X = Anchor.X - PanelSize.X * 0.5f;
+		float Y = Anchor.Y - Reach - Gap - PanelSize.Y;
+		if (Y < Edge)
+		{
+			Y = Anchor.Y + Reach + Gap;
+		}
+		X = FMath::Max(FMath::Min(X, Bounds.X - PanelSize.X - Edge), Edge);
+		Y = FMath::Max(FMath::Min(Y, Bounds.Y - PanelSize.Y - Edge), Edge);
+		SelectionOffset = FVector2f(FMath::RoundToFloat(X), FMath::RoundToFloat(Y));
+	}
+
 	TSharedRef<SWidget> MakeHeader()
 	{
 		const FAtlasStyle& Style = FAtlasStyle::Get();
@@ -488,6 +970,30 @@ private:
 				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
 				[
 					MakeLabel(TEXT("Atlas"), Style.FontBold, FLinearColor::White)
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 2.f, 0.f))
+				[
+					// Hovered, not clicked: a button-like box whose tooltip lists what the map takes.
+					SNew(SBorder)
+					.BorderImage(&Style.Clear)
+					.Padding(FMargin(7.f, 0.f))
+					.ToolTip(MakeShortcutsTip())
+					[
+						SNew(STextBlock).Font(Style.FontBold).ColorAndOpacity(FSlateColor(FLinearColor::White))
+						.Text(FText::FromString(TEXT("?")))
+					]
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[
+					SNew(SAtlasButton)
+					.ButtonStyle(&Style.Flat)
+					.IsFocusable(false)
+					.ContentPadding(FMargin(6.f, 0.f))
+					.OnClicked_Lambda([]() { if (Sub()) { Sub()->SetFullscreen(!Sub()->IsFullscreen()); } return FReply::Handled(); })
+					[
+						SNew(STextBlock).Font(Style.Font).ColorAndOpacity(FSlateColor(FLinearColor::White))
+						.Text_Lambda([]() { return FText::FromString(Sub() && Sub()->IsFullscreen() ? TEXT("Windowed") : TEXT("Fullscreen")); })
+					]
 				]
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 				[
@@ -699,6 +1205,18 @@ private:
 							]
 							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 							[
+								HeaderButton(TEXT("Copy"), TEXT("Copy this building's settings, color, pattern and material. On the map: Ctrl+right click a building."),
+									[]() { return Sub() && Sub()->CanCopySelected(); },
+									[]() { if (Sub()) { Sub()->CopySelected(); } })
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+							[
+								HeaderButton(TEXT("Paste"), TEXT("Paste whatever of the copied settings and look this building can take. On the map: Ctrl+left click a building, or hold and drag across several."),
+									[this]() { return bCanPaste; },
+									[this]() { if (Sub()) { Sub()->PasteToSelected(); } ClockDraft.Reset(); bRecipePicker = false; })
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+							[
 								SNew(SAtlasButton)
 								.ButtonStyle(&Style.Flat)
 								.IsFocusable(false)
@@ -710,9 +1228,18 @@ private:
 							]
 						]
 					]
+					// What the last copy or paste did.
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(10.f, 6.f, 10.f, 0.f))
+					[
+						SNew(STextBlock).Font(Style.FontSmall).ColorAndOpacity(FSlateColor(TextDim)).AutoWrapText(true)
+						.Text_Lambda([]() { return Sub() ? Sub()->GetClipboardStatus() : FText::GetEmpty(); })
+						.Visibility_Lambda([]() { return Sub() && !Sub()->GetClipboardStatus().IsEmpty() ? EVisibility::Visible : EVisibility::Collapsed; })
+					]
+					// Machine controls. A collapsed slot drops its padding, so other buildings get no gap here.
 					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(10.f, 8.f, 10.f, 10.f))
 					[
 						SNew(SVerticalBox)
+						.Visibility_Lambda([this]() { return State.bValid && State.bFactory ? EVisibility::Visible : EVisibility::Collapsed; })
 						+ SVerticalBox::Slot().AutoHeight()
 						[
 							MakeRecipeSection()
@@ -771,18 +1298,20 @@ private:
 								return FString::Printf(TEXT("Power shards  %d    (range %.0f%% to %.0f%%)"), State.Shards, State.Min * 100.f, State.Max * 100.f);
 							})
 						]
-						+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 3.f, 0.f, 0.f))
+						+ SVerticalBox::Slot().AutoHeight()
 						[
-							Line([this]()
-							{
-								if (!State.bCanBoost)
+							// Only for buildings that take a Somersloop at all.
+							SNew(SBox)
+							.Padding(FMargin(0.f, 3.f, 0.f, 0.f))
+							.Visibility_Lambda([this]() { return State.bCanBoost ? EVisibility::Visible : EVisibility::Collapsed; })
+							[
+								Line([this]()
 								{
-									return FString(TEXT("Somersloop  not supported"));
-								}
-								return State.MaxBoost > 1.001f
-									? FString::Printf(TEXT("Somersloop  installed, output x%.1f"), State.MaxBoost)
-									: FString(TEXT("Somersloop  none"));
-							})
+									return State.MaxBoost > 1.001f
+										? FString::Printf(TEXT("Somersloop  installed, output x%.1f"), State.MaxBoost)
+										: FString(TEXT("Somersloop  none"));
+								})
+							]
 						]
 						+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 3.f, 0.f, 0.f))
 						[
@@ -802,25 +1331,695 @@ private:
 								MakeLabel(TEXT("Production paused"), Style.Font, TextMain)
 							]
 						]
-						+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f))
+						+ SVerticalBox::Slot().AutoHeight()
 						[
-							SNew(STextBlock).Font(Style.FontSmall).ColorAndOpacity(FSlateColor(TextDim)).AutoWrapText(true)
-							.Text_Lambda([this]()
+							// Only when something stops the controls above from working.
+							SNew(SBox)
+							.Padding(FMargin(0.f, 6.f, 0.f, 0.f))
+							.Visibility_Lambda([this]()
 							{
-								if (State.bValid && !State.bAuthority)
-								{
-									return FText::FromString(TEXT("Only the host can change buildings."));
-								}
-								if (State.bValid && !State.bCanChangeClock)
-								{
-									return FText::FromString(TEXT("This building has no clock speed."));
-								}
-								return FText::FromString(TEXT("Clock changes apply after the current production cycle. Add or remove power shards at the building itself."));
+								return State.bValid && (!State.bAuthority || !State.bCanChangeClock) ? EVisibility::Visible : EVisibility::Collapsed;
 							})
+							[
+								SNew(STextBlock).Font(Style.FontSmall).ColorAndOpacity(FSlateColor(TextDim)).AutoWrapText(true)
+								.Text_Lambda([this]()
+								{
+									return FText::FromString(!State.bAuthority
+										? TEXT("Only the host can change buildings.")
+										: TEXT("This building has no clock speed."));
+								})
+							]
 						]
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(10.f, 8.f, 10.f, 2.f))
+					[
+						MakeControlsSection()
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(10.f, 8.f, 10.f, 10.f))
+					[
+						MakeCustomizeSection()
 					]
 				]
 			];
+	}
+
+	/** A label column for the settings rows, so their controls line up. */
+	TSharedRef<SWidget> RowLabel(const TCHAR* Text)
+	{
+		return SNew(SBox).WidthOverride(64.f).VAlign(VAlign_Center)
+			[
+				MakeLabel(Text, FAtlasStyle::Get().Font, TextDim)
+			];
+	}
+
+	/** Names, load modes, switches, flow limits and lights. Each row shows only when the building has that setting. */
+	TSharedRef<SWidget> MakeControlsSection()
+	{
+		const FAtlasStyle& Style = FAtlasStyle::Get();
+		const auto Shown = [this](bool FControls::* Flag)
+		{
+			return [this, Flag]() { return Controls.*Flag ? EVisibility::Visible : EVisibility::Collapsed; };
+		};
+		const auto Line = [&Style](TFunction<FString()> Text)
+		{
+			return SNew(STextBlock).Font(Style.Font).ColorAndOpacity(FSlateColor(TextMain))
+				.Text_Lambda([Text]() { return FText::FromString(Text()); });
+		};
+		const auto ToggleRow = [&Style](const TCHAR* Label, TFunction<bool()> IsOn, TFunction<void()> OnClick)
+		{
+			return SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(2.f, 3.f, 8.f, 3.f))[MakeToggle(IsOn, OnClick)]
+				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)[MakeLabel(Label, Style.Font, TextMain)];
+		};
+		const auto ApplyLight = [this](TOptional<bool> On, TOptional<bool> Night, TOptional<float> Intensity, TOptional<int32> Slot)
+		{
+			if (Sub())
+			{
+				Sub()->SetSelectedLight(On.Get(Controls.bLightOn), Night.Get(Controls.bNightOnly), Intensity.Get(Controls.Intensity), Slot.Get(Controls.LightColorSlot));
+			}
+		};
+
+		return SNew(SVerticalBox)
+			.Visibility_Lambda([this]() { return State.bValid && Controls.Any() ? EVisibility::Visible : EVisibility::Collapsed; })
+			.IsEnabled_Lambda([this]() { return State.bAuthority; })
+			// Divides it from the machine controls above, when there are any.
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 8.f))
+			[
+				SNew(SBox).HeightOverride(1.f)
+				.Visibility_Lambda([this]() { return State.bFactory ? EVisibility::Visible : EVisibility::Collapsed; })
+				[
+					SNew(SImage).Image(&Style.White).ColorAndOpacity(FSlateColor(RowColor))
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 6.f))
+			[
+				SNew(SHorizontalBox)
+				.Visibility_Lambda(Shown(&FControls::bHasName))
+				+ SHorizontalBox::Slot().AutoWidth()[RowLabel(TEXT("Name"))]
+				+ SHorizontalBox::Slot().FillWidth(1.f)
+				[
+					SNew(SBorder)
+					.BorderImage(&Style.White)
+					.BorderBackgroundColor(FSlateColor(RowColor))
+					.Padding(FMargin(5.f, 3.f))
+					[
+						SNew(SEditableText)
+						.Style(&Style.TextInput)
+						.SelectAllTextWhenFocused(true)
+						.ClearKeyboardFocusOnCommit(true)
+						.ToolTip(MakeTip(FText::FromString(TEXT("Press Enter to rename."))))
+						.Text_Lambda([this]() { return Controls.Name; })
+						.OnTextCommitted_Lambda([this](const FText& Text, ETextCommit::Type Commit)
+						{
+							if (Commit != ETextCommit::OnCleared && !Text.EqualTo(Controls.Name) && Sub())
+							{
+								Sub()->SetSelectedName(Text);
+							}
+						})
+					]
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 6.f))
+			[
+				SNew(SHorizontalBox)
+				.Visibility_Lambda(Shown(&FControls::bHasLoadMode))
+				+ SHorizontalBox::Slot().AutoWidth()[RowLabel(TEXT("Mode"))]
+				+ SHorizontalBox::Slot().FillWidth(1.f).Padding(FMargin(0.f, 0.f, 3.f, 0.f))
+				[
+					MakeTextButton(FText::FromString(TEXT("Load")), [this]() { return Controls.bLoadMode; },
+						[]() { if (Sub()) { Sub()->SetSelectedLoadMode(true); } })
+				]
+				+ SHorizontalBox::Slot().FillWidth(1.f).Padding(FMargin(3.f, 0.f, 0.f, 0.f))
+				[
+					MakeTextButton(FText::FromString(TEXT("Unload")), [this]() { return !Controls.bLoadMode; },
+						[]() { if (Sub()) { Sub()->SetSelectedLoadMode(false); } })
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 6.f))
+			[
+				SNew(SBox)
+				.Visibility_Lambda(Shown(&FControls::bHasSwitch))
+				[
+					ToggleRow(TEXT("Switched on"), [this]() { return Controls.bSwitchOn; },
+						[this]() { if (Sub()) { Sub()->SetSelectedSwitch(!Controls.bSwitchOn); } })
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 6.f))
+			[
+				SNew(SVerticalBox)
+				.Visibility_Lambda(Shown(&FControls::bHasFlowLimit))
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					Line([this]()
+					{
+						// The game keeps m3 per second; players read m3 per minute.
+						const float Ratio = FlowDraft.IsSet() ? FlowDraft.GetValue() : FlowRatio();
+						if (Ratio >= 1.f)
+						{
+							return FString::Printf(TEXT("Flow limit  none (max %.0f m3/min)"), Controls.MaxFlow * 60.f);
+						}
+						return FString::Printf(TEXT("Flow limit  %.1f m3/min"), Ratio * Controls.MaxFlow * 60.f);
+					})
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+				[
+					SNew(SAtlasSlider)
+					.Style(&Style.Slider)
+					.IsFocusable(false)
+					.Value_Lambda([this]() { return FlowDraft.IsSet() ? FlowDraft.GetValue() : FlowRatio(); })
+					.OnValueChanged_Lambda([this](float Value)
+					{
+						// Whole tenths of a cubic metre per minute.
+						const float PerMinute = FMath::RoundToFloat(Value * Controls.MaxFlow * 600.f) / 10.f;
+						FlowDraft = Controls.MaxFlow > 0.f ? FMath::Clamp(PerMinute / (Controls.MaxFlow * 60.f), 0.f, 1.f) : 1.f;
+					})
+					.OnMouseCaptureEnd_Lambda([this]()
+					{
+						if (FlowDraft.IsSet() && Sub())
+						{
+							const float Ratio = FlowDraft.GetValue();
+							Sub()->SetSelectedFlowLimit(Ratio >= 1.f ? -1.f : Ratio * Controls.MaxFlow);
+						}
+						FlowDraft.Reset();
+					})
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 6.f))
+			[
+				SNew(SVerticalBox)
+				.Visibility_Lambda(Shown(&FControls::bHasLight))
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					ToggleRow(TEXT("Light on"), [this]() { return Controls.bLightOn; },
+						[this, ApplyLight]() { ApplyLight(!Controls.bLightOn, {}, {}, {}); })
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					ToggleRow(TEXT("Only at night"), [this]() { return Controls.bNightOnly; },
+						[this, ApplyLight]() { ApplyLight({}, !Controls.bNightOnly, {}, {}); })
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+				[
+					Line([this]()
+					{
+						return FString::Printf(TEXT("Brightness  %d%%"), FMath::RoundToInt32((LightDraft.IsSet() ? LightDraft.GetValue() : Controls.Intensity) * 100.f));
+					})
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+				[
+					SNew(SAtlasSlider)
+					.Style(&Style.Slider)
+					.IsFocusable(false)
+					.Value_Lambda([this]() { return LightDraft.IsSet() ? LightDraft.GetValue() : Controls.Intensity; })
+					.OnValueChanged_Lambda([this](float Value) { LightDraft = FMath::RoundToFloat(Value * 100.f) / 100.f; })
+					.OnMouseCaptureEnd_Lambda([this, ApplyLight]()
+					{
+						if (LightDraft.IsSet())
+						{
+							ApplyLight({}, {}, LightDraft.GetValue(), {});
+						}
+						LightDraft.Reset();
+					})
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f))
+				[
+					SAssignNew(LightColorList, SWrapBox).UseAllottedSize(true)
+				]
+			];
+	}
+
+	float FlowRatio() const
+	{
+		return Controls.FlowLimit < 0.f || Controls.MaxFlow <= 0.f ? 1.f : FMath::Clamp(Controls.FlowLimit / Controls.MaxFlow, 0.f, 1.f);
+	}
+
+	/** The light color chips follow the game's slot count, which is only known once a light is selected. */
+	void RebuildLightColors()
+	{
+		if (!LightColorList)
+		{
+			return;
+		}
+		const FAtlasStyle& Style = FAtlasStyle::Get();
+		LightColorList->ClearChildren();
+		for (int32 i = 0; i < BuiltLightSlots; i++)
+		{
+			LightColorList->AddSlot()
+			[
+				MakeChoice(FText::FromString(FString::Printf(TEXT("Light color %d"), i + 1)), [this, i]() { return Controls.LightColorSlot == i; },
+					[this, i]()
+					{
+						if (Sub())
+						{
+							Sub()->SetSelectedLight(Controls.bLightOn, Controls.bNightOnly, Controls.Intensity, i);
+						}
+					},
+					SNew(SBox).WidthOverride(22.f).HeightOverride(22.f)
+					[
+						SNew(SImage).Image(&Style.White)
+						.ColorAndOpacity_Lambda([this, i]() { return FSlateColor(Controls.LightColors.IsValidIndex(i) ? Controls.LightColors[i] : FLinearColor::White); })
+					])
+			];
+		}
+	}
+
+	/** A flat text button for the selection's title band, dimmed while it can't be used. */
+	TSharedRef<SWidget> HeaderButton(const TCHAR* Label, const TCHAR* Tooltip, TFunction<bool()> IsEnabled, TFunction<void()> OnClick)
+	{
+		const FAtlasStyle& Style = FAtlasStyle::Get();
+		return SNew(SAtlasButton)
+			.ButtonStyle(&Style.Flat)
+			.IsFocusable(false)
+			.ToolTip(MakeTip(FText::FromString(Tooltip)))
+			.ContentPadding(FMargin(6.f, 0.f))
+			.IsEnabled_Lambda([IsEnabled]() { return IsEnabled(); })
+			.OnClicked_Lambda([OnClick]() { OnClick(); return FReply::Handled(); })
+			[
+				SNew(STextBlock).Text(FText::FromString(Label)).Font(Style.Font)
+				.ColorAndOpacity_Lambda([IsEnabled]() { return FSlateColor(IsEnabled() ? FLinearColor::White : FLinearColor(1.f, 1.f, 1.f, 0.45f)); })
+			];
+	}
+
+	/** Color, pattern and material. Each part shows only when the building takes that kind of customization. */
+	TSharedRef<SWidget> MakeCustomizeSection()
+	{
+		const FAtlasStyle& Style = FAtlasStyle::Get();
+		const auto Heading = [&Style](const TCHAR* Text) { return MakeLabel(Text, Style.FontSmall, TextDim); };
+		const auto Has = [](TArray<FCustomizeOption> FCustomizeOptions::* List)
+		{
+			return [List]() { return Sub() && !(Sub()->GetCustomizeOptions().*List).IsEmpty() ? EVisibility::Visible : EVisibility::Collapsed; };
+		};
+
+		return SNew(SVerticalBox)
+			.Visibility_Lambda([this]() { return State.bValid && HasCustomizeOptions() ? EVisibility::Visible : EVisibility::Collapsed; })
+			.IsEnabled_Lambda([this]() { return State.bAuthority; })
+			// Divides it from the machine controls or settings above, when there are any.
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 8.f))
+			[
+				SNew(SBox).HeightOverride(1.f)
+				.Visibility_Lambda([this]() { return State.bFactory || Controls.Any() ? EVisibility::Visible : EVisibility::Collapsed; })
+				[
+					SNew(SImage).Image(&Style.White).ColorAndOpacity(FSlateColor(RowColor))
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				MakeAppearanceHeader()
+			]
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SVerticalBox)
+				.Visibility_Lambda([]() { return Sub() && Sub()->IsAppearanceOpen() ? EVisibility::Visible : EVisibility::Collapsed; })
+				+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f))
+				[
+					SNew(SVerticalBox)
+					.Visibility_Lambda(Has(&FCustomizeOptions::Swatches))
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 3.f))[Heading(TEXT("Color"))]
+					+ SVerticalBox::Slot().AutoHeight()[SAssignNew(SwatchList, SWrapBox).UseAllottedSize(true)]
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))[MakeCustomColorEditor()]
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
+				[
+					SNew(SVerticalBox)
+					.Visibility_Lambda(Has(&FCustomizeOptions::Patterns))
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 3.f))
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)[Heading(TEXT("Pattern"))]
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+						[
+							SNew(SBox).WidthOverride(70.f)
+							.IsEnabled_Lambda([this]() { return Custom.Pattern != nullptr; })
+							[
+								MakeTextButton(FText::FromString(TEXT("Rotate")), []() { return false; },
+									[]() { if (Sub()) { Sub()->RotateSelectedPattern(); } })
+							]
+						]
+					]
+					+ SVerticalBox::Slot().AutoHeight()[SAssignNew(PatternList, SWrapBox).UseAllottedSize(true)]
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
+				[
+					SNew(SVerticalBox)
+					.Visibility_Lambda(Has(&FCustomizeOptions::Materials))
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 3.f))[Heading(TEXT("Material"))]
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SAssignNew(MaterialList, SWrapBox).UseAllottedSize(true)
+						.IsEnabled_Lambda([]() { return Sub() && Sub()->GetCustomizeOptions().MaterialNote.IsEmpty(); })
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 3.f, 0.f, 0.f))
+					[
+						SNew(STextBlock).Font(Style.FontSmall).ColorAndOpacity(FSlateColor(TextDim)).AutoWrapText(true)
+						.Text_Lambda([]()
+						{
+							const FText& Note = Sub() ? Sub()->GetCustomizeOptions().MaterialNote : FText::GetEmpty();
+							return Note.IsEmpty() ? FText::FromString(TEXT("Costs the new version's parts; the old ones come back, as when you dismantle.")) : Note;
+						})
+					]
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f))
+			[
+				SNew(STextBlock).Font(Style.FontSmall).ColorAndOpacity(FSlateColor(FLinearColor(FColor(235, 90, 80)))).AutoWrapText(true)
+				.Text_Lambda([]() { return Sub() ? Sub()->GetCustomizeError() : FText::GetEmpty(); })
+				.Visibility_Lambda([]() { return Sub() && !Sub()->GetCustomizeError().IsEmpty() ? EVisibility::Visible : EVisibility::Collapsed; })
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f))
+			[
+				SNew(STextBlock).Font(Style.FontSmall).ColorAndOpacity(FSlateColor(TextDim))
+				.Text(FText::FromString(TEXT("Only the host can change buildings.")))
+				.Visibility_Lambda([this]() { return State.bAuthority || State.bFactory ? EVisibility::Collapsed : EVisibility::Visible; })
+			];
+	}
+
+	/** The building's colors right now, for the folded Appearance row. */
+	FLinearColor CurrentColor(bool bSecondary) const
+	{
+		if (Custom.bCustom)
+		{
+			return bSecondary ? Custom.CustomSecondary : Custom.CustomPrimary;
+		}
+		if (const UAtlasSubsystem* Atlas = Sub())
+		{
+			for (const FCustomizeOption& Option : Atlas->GetCustomizeOptions().Swatches)
+			{
+				if (Option.Desc == Custom.Swatch)
+				{
+					return bSecondary ? Option.Secondary : Option.Primary;
+				}
+			}
+		}
+		return RowColor;
+	}
+
+	/**
+	 * Color, pattern and material fill much of the panel, so they fold to this one row: the building's current
+	 * colors and a button to open them. The choice is kept between buildings and sessions.
+	 */
+	TSharedRef<SWidget> MakeAppearanceHeader()
+	{
+		const FAtlasStyle& Style = FAtlasStyle::Get();
+		const auto Chip = [this, &Style](bool bSecondary)
+		{
+			return SNew(SBox).WidthOverride(12.f).HeightOverride(12.f)
+				[
+					SNew(SImage).Image(&Style.White)
+					.ColorAndOpacity_Lambda([this, bSecondary]() { return FSlateColor(CurrentColor(bSecondary)); })
+				];
+		};
+		const auto HasSwatches = []() { return Sub() && !Sub()->GetCustomizeOptions().Swatches.IsEmpty() ? EVisibility::Visible : EVisibility::Collapsed; };
+
+		return SNew(SAtlasButton)
+			.ButtonStyle(&Style.Flat)
+			.IsFocusable(false)
+			.ContentPadding(FMargin(0.f, 2.f))
+			.OnClicked_Lambda([]() { if (Sub()) { Sub()->SetAppearanceOpen(!Sub()->IsAppearanceOpen()); } return FReply::Handled(); })
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 8.f, 0.f))
+				[
+					MakeLabel(TEXT("Appearance"), Style.Font, TextMain)
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 3.f, 0.f))
+				[
+					SNew(SBox).Visibility_Lambda(HasSwatches)[Chip(false)]
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[
+					SNew(SBox).Visibility_Lambda(HasSwatches)[Chip(true)]
+				]
+				+ SHorizontalBox::Slot().FillWidth(1.f).HAlign(HAlign_Right).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock).Font(Style.Font).ColorAndOpacity(FSlateColor(Accent))
+					.Text_Lambda([]() { return FText::FromString(Sub() && Sub()->IsAppearanceOpen() ? TEXT("Hide") : TEXT("Show")); })
+				]
+			];
+	}
+
+	/** Shown while the building wears the custom swatch: its two colors, picked by field or hex, and its finish. */
+	TSharedRef<SWidget> MakeCustomColorEditor()
+	{
+		const FAtlasStyle& Style = FAtlasStyle::Get();
+		const auto SlotButton = [this, &Style](const TCHAR* Label, bool bSecondary)
+		{
+			return SNew(SAtlasButton)
+				.ButtonStyle(&Style.Tinted)
+				.IsFocusable(false)
+				.ButtonColorAndOpacity_Lambda([this, bSecondary]() { return FSlateColor(bEditSecondary == bSecondary ? Accent : RowColor); })
+				.ContentPadding(FMargin(5.f, 3.f))
+				.OnClicked_Lambda([this, bSecondary]() { bEditSecondary = bSecondary; return FReply::Handled(); })
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 5.f, 0.f))
+					[
+						SNew(SBox).WidthOverride(12.f).HeightOverride(12.f)
+						[
+							SNew(SImage).Image(&Style.White)
+							.ColorAndOpacity_Lambda([this, bSecondary]() { return FSlateColor(bSecondary ? DraftSecondary : DraftPrimary); })
+						]
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						MakeLabel(Label, Style.Font, TextMain)
+					]
+				];
+		};
+
+		return SNew(SVerticalBox)
+			.Visibility_Lambda([this]() { return Custom.bCustom ? EVisibility::Visible : EVisibility::Collapsed; })
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth()[SlotButton(TEXT("Primary"), false)]
+				+ SHorizontalBox::Slot().AutoWidth().Padding(FMargin(4.f, 0.f, 0.f, 0.f))[SlotButton(TEXT("Secondary"), true)]
+				+ SHorizontalBox::Slot().FillWidth(1.f).HAlign(HAlign_Right).VAlign(VAlign_Center)
+				[
+					SNew(SBorder)
+					.BorderImage(&Style.White)
+					.BorderBackgroundColor(FSlateColor(RowColor))
+					.Padding(FMargin(5.f, 3.f))
+					[
+						SNew(SBox).WidthOverride(66.f)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[MakeLabel(TEXT("#"), Style.Font, TextDim)]
+							+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+							[
+								SNew(SEditableText)
+								.Style(&Style.TextInput)
+								.SelectAllTextWhenFocused(true)
+								.ClearKeyboardFocusOnCommit(true)
+								.ToolTip(MakeTip(FText::FromString(TEXT("Hex color, like FF8800. Press Enter to apply."))))
+								.Text_Lambda([this]() { return FText::FromString(ToHex(EditedDraft())); })
+								.OnTextCommitted_Lambda([this](const FText& Text, ETextCommit::Type Commit)
+								{
+									FLinearColor Parsed;
+									if (Commit != ETextCommit::OnCleared && FromHex(Text.ToString(), Parsed))
+									{
+										EditedDraft() = Parsed;
+										ApplyCustomColor(Custom.Finish);
+									}
+								})
+							]
+						]
+					]
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f))
+			[
+				SAssignNew(ColorField, SAtlasColorField)
+				.Color_Lambda([this]() { return EditedDraft(); })
+				.OnChanged_Lambda([this](FLinearColor Color) { EditedDraft() = Color; })
+				.OnCommitted_Lambda([this]() { ApplyCustomColor(Custom.Finish); })
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
+			[
+				SNew(SVerticalBox)
+				.Visibility_Lambda([]() { return Sub() && !Sub()->GetCustomizeOptions().Finishes.IsEmpty() ? EVisibility::Visible : EVisibility::Collapsed; })
+				+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 3.f))[MakeLabel(TEXT("Finish"), Style.FontSmall, TextDim)]
+				+ SVerticalBox::Slot().AutoHeight()[SAssignNew(FinishList, SWrapBox).UseAllottedSize(true)]
+			];
+	}
+
+	FLinearColor& EditedDraft()
+	{
+		return bEditSecondary ? DraftSecondary : DraftPrimary;
+	}
+
+	FLinearColor EditedDraft() const
+	{
+		return bEditSecondary ? DraftSecondary : DraftPrimary;
+	}
+
+	void ApplyCustomColor(UClass* Finish)
+	{
+		if (UAtlasSubsystem* Atlas = Sub())
+		{
+			Atlas->SetSelectedCustomColor(DraftPrimary, DraftSecondary, Finish);
+		}
+	}
+
+	/**
+	 * Outside a drag the draft follows the building, so a refused change (say, not enough items) snaps back.
+	 * A building in a preset swatch starts the draft from that swatch's colors, so picking "custom" changes nothing at first.
+	 */
+	void SyncDraft(const UAtlasSubsystem& Atlas)
+	{
+		if (ColorField.IsValid() && ColorField->IsDragging())
+		{
+			return;
+		}
+		if (Custom.bCustom)
+		{
+			DraftPrimary = Custom.CustomPrimary;
+			DraftSecondary = Custom.CustomSecondary;
+			return;
+		}
+		for (const FCustomizeOption& Option : Atlas.GetCustomizeOptions().Swatches)
+		{
+			if (Option.Desc == Custom.Swatch)
+			{
+				DraftPrimary = Option.Primary;
+				DraftSecondary = Option.Secondary;
+				return;
+			}
+		}
+	}
+
+	bool HasCustomizeOptions() const
+	{
+		const UAtlasSubsystem* Atlas = Sub();
+		if (!Atlas)
+		{
+			return false;
+		}
+		const FCustomizeOptions& Options = Atlas->GetCustomizeOptions();
+		return !Options.Swatches.IsEmpty() || !Options.Patterns.IsEmpty() || !Options.Materials.IsEmpty();
+	}
+
+	/** A square button around Content, outlined in the accent colour while IsCurrent holds. */
+	TSharedRef<SWidget> MakeChoice(const FText& Name, TFunction<bool()> IsCurrent, TFunction<void()> OnClick, const TSharedRef<SWidget>& Content)
+	{
+		const FAtlasStyle& Style = FAtlasStyle::Get();
+		return SNew(SBox).Padding(FMargin(0.f, 0.f, 4.f, 4.f))
+			[
+				SNew(SAtlasButton)
+				.ButtonStyle(&Style.Flat)
+				.IsFocusable(false)
+				.ToolTip(MakeTip(Name))
+				.ContentPadding(FMargin(0.f))
+				.OnClicked_Lambda([OnClick]() { OnClick(); return FReply::Handled(); })
+				[
+					SNew(SBorder)
+					.BorderImage(&Style.White)
+					.BorderBackgroundColor_Lambda([IsCurrent]() { return FSlateColor(IsCurrent() ? Accent : RowColor); })
+					.Padding(FMargin(2.f))
+					[
+						Content
+					]
+				]
+			];
+	}
+
+	/** Called when the selection changes: the lists depend on what the building accepts. */
+	void RebuildCustomizeLists(const UAtlasSubsystem& Atlas)
+	{
+		if (!SwatchList || !PatternList || !MaterialList || !FinishList)
+		{
+			return;
+		}
+		const FAtlasStyle& Style = FAtlasStyle::Get();
+		const FCustomizeOptions& Options = Atlas.GetCustomizeOptions();
+		SwatchList->ClearChildren();
+		PatternList->ClearChildren();
+		MaterialList->ClearChildren();
+		IconBrushes.Reset();
+
+		const auto IconOf = [this](UTexture2D* Icon) -> const FSlateBrush*
+		{
+			const TSharedRef<FSlateBrush> Brush = MakeShared<FSlateBrush>();
+			Brush->SetResourceObject(Icon);
+			Brush->ImageSize = FVector2D(30.0, 30.0);
+			Brush->DrawAs = ESlateBrushDrawType::Image;
+			IconBrushes.Add(Brush);
+			return &Brush.Get();
+		};
+
+		for (const FCustomizeOption& Option : Options.Swatches)
+		{
+			UClass* Desc = Option.Desc;
+			SwatchList->AddSlot()
+			[
+				MakeChoice(Option.Name, [this, Desc]() { return Custom.Swatch == Desc; },
+					[Desc]() { if (Sub()) { Sub()->SetSelectedSwatch(Desc); } },
+					SNew(SBox).WidthOverride(22.f).HeightOverride(22.f)
+					[
+						// Primary on top, secondary as a strip below, as the game's own swatch picker shows them.
+						SNew(SVerticalBox)
+						+ SVerticalBox::Slot().FillHeight(3.f)[SNew(SImage).Image(&Style.White).ColorAndOpacity(FSlateColor(Option.Primary))]
+						+ SVerticalBox::Slot().FillHeight(1.f)[SNew(SImage).Image(&Style.White).ColorAndOpacity(FSlateColor(Option.Secondary))]
+					])
+			];
+		}
+		if (Options.CustomSwatch)
+		{
+			SwatchList->AddSlot()
+			[
+				MakeChoice(FText::FromString(TEXT("Custom color")), [this]() { return Custom.bCustom; },
+					[this]() { if (!Custom.bCustom) { ApplyCustomColor(nullptr); } },
+					SNew(SBox).WidthOverride(22.f).HeightOverride(22.f)[SNew(SAtlasHueChip)])
+			];
+		}
+
+		FinishList->ClearChildren();
+		for (const FCustomizeOption& Option : Options.Finishes)
+		{
+			UClass* Desc = Option.Desc;
+			FinishList->AddSlot()
+			[
+				SNew(SBox).Padding(FMargin(0.f, 0.f, 4.f, 4.f)).MinDesiredWidth(64.f)
+				[
+					MakeTextButton(Option.Name, [this, Desc]() { return Custom.Finish == Desc; },
+						[this, Desc]() { ApplyCustomColor(Custom.Finish == Desc ? nullptr : Desc); })
+				]
+			];
+		}
+
+		for (int32 i = 0; i < Options.Patterns.Num(); i++)
+		{
+			const FCustomizeOption& Option = Options.Patterns[i];
+			UClass* Desc = Option.Desc;
+			// The first entry is "None", which the state reports as no pattern at all.
+			const bool bNone = i == 0;
+			const TSharedRef<SWidget> Face = Option.Icon
+				? StaticCastSharedRef<SWidget>(SNew(SImage).Image(IconOf(Option.Icon)))
+				: StaticCastSharedRef<SWidget>(SNew(SBox).WidthOverride(30.f).HeightOverride(30.f).HAlign(HAlign_Center).VAlign(VAlign_Center)
+					[
+						MakeLabel(Option.Name, Style.FontSmall, TextMain)
+					]);
+			PatternList->AddSlot()
+			[
+				MakeChoice(Option.Name, [this, Desc, bNone]() { return bNone ? Custom.Pattern == nullptr : Custom.Pattern == Desc; },
+					[Desc]() { if (Sub()) { Sub()->SetSelectedPattern(Desc); } },
+					SNew(SBox).WidthOverride(30.f).HeightOverride(30.f)[Face])
+			];
+		}
+
+		for (int32 i = 0; i < Options.Materials.Num(); i++)
+		{
+			const FCustomizeOption& Option = Options.Materials[i];
+			UClass* Desc = Option.Desc;
+			const TSharedRef<SWidget> Face = Option.Icon
+				? StaticCastSharedRef<SWidget>(SNew(SImage).Image(IconOf(Option.Icon)))
+				: StaticCastSharedRef<SWidget>(MakeLabel(Option.Name, Style.FontSmall, TextMain));
+			MaterialList->AddSlot()
+			[
+				MakeChoice(Option.Name, [i]() { return Sub() && Sub()->GetCustomizeOptions().CurrentMaterial == i; },
+					[Desc]() { if (Sub()) { Sub()->SetSelectedMaterial(Desc); } },
+					SNew(SBox).MinDesiredWidth(30.f).HeightOverride(30.f).HAlign(HAlign_Center).VAlign(VAlign_Center)[Face])
+			];
+		}
 	}
 
 	TSharedRef<SWidget> MakeRecipeSection()
@@ -946,9 +2145,9 @@ private:
 		const FAtlasStyle& Style = FAtlasStyle::Get();
 		const bool bSeenOnly = Feature == EFeature::SporeFlowers || Feature == EFeature::GasPillars;
 		return SNew(SHorizontalBox)
-			.ToolTipText(bSeenOnly
+			.ToolTip(MakeTip(bSeenOnly
 				? FText::FromString(TEXT("Only exist in the game while their part of the world is loaded. Atlas remembers each one it has seen, in every save."))
-				: FText::GetEmpty())
+				: FText::GetEmpty()))
 			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(2.f, 3.f, 8.f, 3.f))
 			[
 				MakeToggle(
@@ -1101,6 +2300,7 @@ private:
 			+ SVerticalBox::Slot().AutoHeight()[MakeSettingRow(TEXT("Highlight hovered building"), &FSettings::bHighlight)]
 			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 2.f))[Heading(TEXT("Map"))]
 			+ SVerticalBox::Slot().AutoHeight()[MakeSettingRow(TEXT("Building outlines"), &FSettings::bOutlines)]
+			+ SVerticalBox::Slot().AutoHeight()[MakeSettingRow(TEXT("Recipe icons when zoomed in"), &FSettings::bRecipeIcons)]
 			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 2.f))
 			[
 				SNew(STextBlock).Font(Style.Font).ColorAndOpacity(FSlateColor(TextMain))
@@ -1226,7 +2426,7 @@ private:
 			.ButtonStyle(&Style.Flat)
 			.IsFocusable(false)
 			.ContentPadding(FMargin(0.f))
-			.ToolTipText(FText::FromString(TEXT("Change color")))
+			.ToolTip(MakeTip(FText::FromString(TEXT("Change color"))))
 			.OnClicked_Lambda([this, Target]()
 			{
 				PickerTarget = PickerTarget == Target ? INDEX_NONE : Target;
@@ -1414,6 +2614,29 @@ private:
 
 	TSharedPtr<SAtlasPanelBorder> Panel;
 	TSharedPtr<SAtlasPanelBorder> SelectionPanel;
+	FVector2f SelectionOffset = FVector2f::ZeroVector;
+	FCustomizeState Custom;
+	uint32 BuiltSelectionVersion = MAX_uint32;
+	TSharedPtr<SWrapBox> SwatchList;
+	TSharedPtr<SWrapBox> PatternList;
+	TSharedPtr<SWrapBox> MaterialList;
+	TSharedPtr<SWrapBox> FinishList;
+	TSharedPtr<SAtlasColorField> ColorField;
+	/** The custom colors being picked, linear. Applied to the building on release or Enter. */
+	FLinearColor DraftPrimary = FLinearColor::White;
+	FLinearColor DraftSecondary = FLinearColor::White;
+	bool bEditSecondary = false;
+	bool bCanPaste = false;
+	FControls Controls;
+	/** Buildings pasted onto during the current Ctrl+left drag, and the map shape last looked at. */
+	TSet<const void*> DragPasted;
+	FVector4f LastDragSource = FVector4f::Zero();
+	TOptional<float> FlowDraft;  // Slider position while dragging, 1 meaning no limit
+	TOptional<float> LightDraft;
+	TSharedPtr<SWrapBox> LightColorList;
+	int32 BuiltLightSlots = 0;
+	/** Brushes for the pattern and material icons; the subsystem keeps the textures alive. */
+	TArray<TSharedRef<FSlateBrush>> IconBrushes;
 	FFactoryState State;
 	TOptional<float> ClockDraft;
 	TSharedPtr<SVerticalBox> RecipeList;
@@ -1464,6 +2687,20 @@ public:
 
 	virtual bool HandleMouseButtonDownEvent(FSlateApplication&, const FPointerEvent& Event) override
 	{
+		// Ctrl+right click copies the building under the cursor, Ctrl+left click pastes onto it. When one lands on
+		// a building, its press and release are both swallowed, so the map neither pans nor opens its marker menu.
+		const bool bRight = Event.GetEffectingButton() == EKeys::RightMouseButton;
+		if (Event.IsControlDown() && (bRight || Event.GetEffectingButton() == EKeys::LeftMouseButton))
+		{
+			const TSharedPtr<SAtlasHud> Pinned = Hud.Pin();
+			if (Pinned && Pinned->OnMapClipboardClick(FVector2f(Event.GetScreenSpacePosition()), bRight))
+			{
+				SwallowUp = Event.GetEffectingButton();
+				bDragPaste = !bRight;
+				bDown = false;
+				return true;
+			}
+		}
 		if (Event.GetEffectingButton() == EKeys::LeftMouseButton)
 		{
 			DownAt = FVector2f(Event.GetScreenSpacePosition());
@@ -1474,6 +2711,19 @@ public:
 
 	virtual bool HandleMouseButtonUpEvent(FSlateApplication&, const FPointerEvent& Event) override
 	{
+		if (SwallowUp.IsValid() && Event.GetEffectingButton() == SwallowUp)
+		{
+			SwallowUp = FKey();
+			if (bDragPaste)
+			{
+				bDragPaste = false;
+				if (const TSharedPtr<SAtlasHud> Pinned = Hud.Pin())
+				{
+					Pinned->EndDragPaste();
+				}
+			}
+			return true;
+		}
 		if (Event.GetEffectingButton() == EKeys::LeftMouseButton && bDown)
 		{
 			bDown = false;
@@ -1490,11 +2740,36 @@ public:
 		return false;
 	}
 
+	/** Drag-paste follows the cursor. Moves are never swallowed: the map never saw the press, so it isn't panning. */
+	virtual bool HandleMouseMoveEvent(FSlateApplication&, const FPointerEvent& Event) override
+	{
+		if (!bDragPaste)
+		{
+			return false;
+		}
+		const TSharedPtr<SAtlasHud> Pinned = Hud.Pin();
+		if (!Pinned || !Event.IsMouseButtonDown(EKeys::LeftMouseButton))
+		{
+			// The release went somewhere this didn't see, such as another window.
+			bDragPaste = false;
+			if (Pinned)
+			{
+				Pinned->EndDragPaste();
+			}
+			return false;
+		}
+		Pinned->OnMapDragPaste(FVector2f(Event.GetScreenSpacePosition()));
+		return false;
+	}
+
 	virtual const TCHAR* GetDebugName() const override { return TEXT("AtlasClick"); }
 
 private:
 	FVector2f DownAt = FVector2f::ZeroVector;
 	bool bDown = false;
+	/** The button whose release belongs to a swallowed Ctrl-click. */
+	FKey SwallowUp;
+	bool bDragPaste = false;
 };
 
 TSharedRef<SWidget> UAtlasMapHud::RebuildWidget()
@@ -1502,6 +2777,7 @@ TSharedRef<SWidget> UAtlasMapHud::RebuildWidget()
 	Super::RebuildWidget();
 	UE_LOG(LogFactoryAtlas, Display, TEXT("[frame %llu] Menu built"), GFrameCounter);
 	Hud = SNew(SAtlasHud);
+	Hud->Owner = this;
 	Hud->WatchFocus();
 
 	if (FSlateApplication::IsInitialized())
@@ -1526,10 +2802,393 @@ void UAtlasMapHud::ReleaseSlateResources(bool bReleaseChildren)
 		FSlateApplication::Get().UnregisterInputPreProcessor(ClickProcessor);
 	}
 	ClickProcessor.Reset();
+	// This runs while the map screen's Slate widgets are being destroyed, so a UMG setter here would write to a
+	// slot that is half gone and trip a Slate assert. Put the layout back next tick instead: by then the torn-down
+	// widgets have dropped their Slate slots and the setters only store values, while the game UI above the map
+	// screen, which stays alive, is restored as usual.
+	if (FullscreenUndo.Num() > 0)
+	{
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Undo = MoveTemp(FullscreenUndo)](float)
+		{
+			for (int32 i = Undo.Num() - 1; i >= 0; i--)
+			{
+				Undo[i]();
+			}
+			return false; // Once
+		}));
+	}
+	FullscreenUndo.Reset();
+	FullscreenHidden.Reset();
+	FullscreenLogFrames = 0;
+	bFullscreenApplied = false;
 	if (UAtlasSubsystem* Atlas = Sub())
 	{
 		Atlas->ClearSelection();
 	}
 	Super::ReleaseSlateResources(bReleaseChildren);
 	Hud.Reset();
+}
+
+namespace AtlasFullscreen
+{
+	/** The widget holding this one: its panel, or past the root of a user widget's tree, that user widget. */
+	UWidget* ParentOf(UWidget* Widget)
+	{
+		if (UPanelWidget* Panel = Widget->GetParent())
+		{
+			return Panel;
+		}
+		const UWidgetTree* Tree = Cast<UWidgetTree>(Widget->GetOuter());
+		return Tree ? Cast<UUserWidget>(Tree->GetOuter()) : nullptr;
+	}
+
+	/** Every widget from Widget up to, not including, Top. Empty if Top is not above it. */
+	TArray<UWidget*> PathTo(UWidget* Widget, const UWidget* Top)
+	{
+		TArray<UWidget*> Path;
+		for (UWidget* Current = Widget; Current; Current = ParentOf(Current))
+		{
+			if (Current == Top)
+			{
+				return Path;
+			}
+			Path.Add(Current);
+		}
+		return {};
+	}
+
+	/** Widget, then every widget holding it, up to the one added to the viewport. */
+	TArray<UWidget*> Ancestors(UWidget* Widget)
+	{
+		TArray<UWidget*> Chain;
+		for (UWidget* Current = Widget; Current; Current = ParentOf(Current))
+		{
+			Chain.Add(Current);
+		}
+		return Chain;
+	}
+
+	/** Siblings fullscreen leaves alone: marker popups and the zoom controls. */
+	bool KeepVisible(const UWidget* Widget)
+	{
+		const FString Name = Widget->GetName();
+		return Name.Contains(TEXT("Popup")) || Name.Contains(TEXT("MarkerPicker")) || Name.Contains(TEXT("Zoom"));
+	}
+
+	template <typename TSlot>
+	void FillAligned(TSlot* Slot, TArray<TFunction<void()>>& Undo)
+	{
+		Undo.Add([Weak = TWeakObjectPtr<TSlot>(Slot), Padding = Slot->GetPadding(),
+			H = Slot->GetHorizontalAlignment(), V = Slot->GetVerticalAlignment()]()
+		{
+			if (TSlot* S = Weak.Get())
+			{
+				S->SetPadding(Padding);
+				S->SetHorizontalAlignment(H);
+				S->SetVerticalAlignment(V);
+			}
+		});
+		Slot->SetPadding(FMargin(0.f));
+		Slot->SetHorizontalAlignment(HAlign_Fill);
+		Slot->SetVerticalAlignment(VAlign_Fill);
+	}
+
+	/** A box slot also takes all the room its box has. */
+	template <typename TSlot>
+	void FillBoxSlot(TSlot* Slot, TArray<TFunction<void()>>& Undo)
+	{
+		Undo.Add([Weak = TWeakObjectPtr<TSlot>(Slot), Size = Slot->GetSize()]()
+		{
+			if (TSlot* S = Weak.Get())
+			{
+				S->SetSize(Size);
+			}
+		});
+		Slot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+		FillAligned(Slot, Undo);
+	}
+}
+
+void UAtlasMapHud::UpdateFullscreen(bool bWanted)
+{
+	if (bWanted != bFullscreenApplied)
+	{
+		if (bWanted)
+		{
+			ApplyFullscreen();
+		}
+		else
+		{
+			RestoreFullscreen();
+		}
+		return;
+	}
+	if (FullscreenLogFrames > 0 && --FullscreenLogFrames == 0)
+	{
+		LogFullscreenChain(TEXT("after"));
+	}
+	// The game's widgets may show their parts again, for instance when the map screen opens.
+	for (const TWeakObjectPtr<UWidget>& Hidden : FullscreenHidden)
+	{
+		if (UWidget* Widget = Hidden.Get(); Widget && Widget->GetVisibility() != ESlateVisibility::Collapsed)
+		{
+			Widget->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+}
+
+void UAtlasMapHud::ApplyFullscreen()
+{
+	using namespace AtlasFullscreen;
+	RestoreFullscreen();
+	// Set even when nothing below works out, so a failed attempt is not retried every frame.
+	bFullscreenApplied = true;
+
+	// The hook puts this widget in Widget_MapContainer, which holds the map, the filter list and the window frame.
+	UUserWidget* Container = GetTypedOuter<UUserWidget>();
+	if (!Container || !Container->WidgetTree)
+	{
+		return;
+	}
+	UWidget* Map = nullptr;
+	Container->WidgetTree->ForEachWidget([&Map](UWidget* Widget)
+	{
+		if (!Map && Widget->GetClass()->GetName() == TEXT("Widget_Map_C"))
+		{
+			Map = Widget;
+		}
+	});
+	if (!Map)
+	{
+		UE_LOG(LogFactoryAtlas, Warning, TEXT("Fullscreen: no Widget_Map inside %s"), *Container->GetName());
+		return;
+	}
+
+	// The map and this menu stay, along with everything holding them; each holder grows to fill its parent. That
+	// goes on above the map screen too, since whatever holds the screen (the game UI, the viewport) may inset it.
+	const TArray<UWidget*> Chain = Ancestors(Map);
+	if (!Chain.Contains(Container))
+	{
+		UE_LOG(LogFactoryAtlas, Warning, TEXT("Fullscreen: %s is not inside %s"), *Map->GetName(), *Container->GetName());
+		return;
+	}
+	FullscreenChain.Reset();
+	for (UWidget* Widget : Chain)
+	{
+		FullscreenChain.Add(Widget);
+	}
+	LogFullscreenChain(TEXT("before"));
+
+	// Only inside the map screen are siblings hidden. Above it they are the rest of the game's UI.
+	TArray<UWidget*> Inside = PathTo(Map, Container);
+	Inside.Append(PathTo(this, Container));
+	const TSet<UWidget*> OnPath(Inside);
+	TArray<UWidget*> Path = Inside;
+	for (int32 i = Chain.Find(Container); i < Chain.Num(); i++)
+	{
+		Path.Add(Chain[i]);
+	}
+	TSet<UWidget*> DoneParents;
+
+	// The widget added to the viewport may have been given a size or position there.
+	if (UGameViewportSubsystem* Viewport = UGameViewportSubsystem::Get(GetWorld()); Viewport && Viewport->IsWidgetAdded(Chain.Last()))
+	{
+		const FGameViewportWidgetSlot Old = Viewport->GetWidgetSlot(Chain.Last());
+		FullscreenUndo.Add([Viewport = TWeakObjectPtr<UGameViewportSubsystem>(Viewport), Weak = TWeakObjectPtr<UWidget>(Chain.Last()), Old]()
+		{
+			if (Viewport.IsValid() && Weak.IsValid() && Viewport->IsWidgetAdded(Weak.Get()))
+			{
+				Viewport->SetWidgetSlot(Weak.Get(), Old);
+			}
+		});
+		FGameViewportWidgetSlot Full = Old;
+		Full.Anchors = FAnchors(0.f, 0.f, 1.f, 1.f);
+		Full.Offsets = FMargin(0.f);
+		Full.Alignment = FVector2D::ZeroVector;
+		Viewport->SetWidgetSlot(Chain.Last(), Full);
+	}
+
+	for (UWidget* Widget : Path)
+	{
+		// A user widget can pad its own content.
+		if (UUserWidget* User = Cast<UUserWidget>(Widget); User && User->GetPadding() != FMargin(0.f))
+		{
+			FullscreenUndo.Add([Weak = TWeakObjectPtr<UUserWidget>(User), Padding = User->GetPadding()]()
+			{
+				if (UUserWidget* U = Weak.Get())
+				{
+					U->SetPadding(Padding);
+				}
+			});
+			User->SetPadding(FMargin(0.f));
+		}
+
+		UPanelSlot* PathSlot = Widget->Slot;
+		if (UCanvasPanelSlot* Canvas = Cast<UCanvasPanelSlot>(PathSlot))
+		{
+			FullscreenUndo.Add([Weak = TWeakObjectPtr<UCanvasPanelSlot>(Canvas), Layout = Canvas->GetLayout(), bAutoSize = Canvas->GetAutoSize()]()
+			{
+				if (UCanvasPanelSlot* S = Weak.Get())
+				{
+					S->SetLayout(Layout);
+					S->SetAutoSize(bAutoSize);
+				}
+			});
+			FAnchorData Fill;
+			Fill.Offsets = FMargin(0.f);
+			Fill.Anchors = FAnchors(0.f, 0.f, 1.f, 1.f);
+			Fill.Alignment = FVector2D::ZeroVector;
+			Canvas->SetAutoSize(false);
+			Canvas->SetLayout(Fill);
+		}
+		else if (UOverlaySlot* Overlay = Cast<UOverlaySlot>(PathSlot))
+		{
+			FillAligned(Overlay, FullscreenUndo);
+		}
+		else if (UHorizontalBoxSlot* HBox = Cast<UHorizontalBoxSlot>(PathSlot))
+		{
+			FillBoxSlot(HBox, FullscreenUndo);
+		}
+		else if (UVerticalBoxSlot* VBox = Cast<UVerticalBoxSlot>(PathSlot))
+		{
+			FillBoxSlot(VBox, FullscreenUndo);
+		}
+		else if (UBorderSlot* Border = Cast<UBorderSlot>(PathSlot))
+		{
+			FillAligned(Border, FullscreenUndo);
+		}
+		else if (USizeBoxSlot* SizeSlot = Cast<USizeBoxSlot>(PathSlot))
+		{
+			FillAligned(SizeSlot, FullscreenUndo);
+		}
+		else if (USafeZoneSlot* SafeSlot = Cast<USafeZoneSlot>(PathSlot))
+		{
+			FillAligned(SafeSlot, FullscreenUndo);
+		}
+		else if (UGridSlot* GridSlot = Cast<UGridSlot>(PathSlot))
+		{
+			FillAligned(GridSlot, FullscreenUndo);
+		}
+
+		UWidget* Parent = ParentOf(Widget);
+		if (!Parent || DoneParents.Contains(Parent))
+		{
+			continue;
+		}
+		DoneParents.Add(Parent);
+
+		// A fixed-size box around the map would keep it at window size.
+		if (USizeBox* SizeBox = Cast<USizeBox>(Parent))
+		{
+			FullscreenUndo.Add([Weak = TWeakObjectPtr<USizeBox>(SizeBox),
+				bWidth = SizeBox->IsWidthOverride(), Width = SizeBox->GetWidthOverride(),
+				bHeight = SizeBox->IsHeightOverride(), Height = SizeBox->GetHeightOverride(),
+				bMaxWidth = SizeBox->IsMaxDesiredWidthOverride(), MaxWidth = SizeBox->GetMaxDesiredWidth(),
+				bMaxHeight = SizeBox->IsMaxDesiredHeightOverride(), MaxHeight = SizeBox->GetMaxDesiredHeight()]()
+			{
+				USizeBox* S = Weak.Get();
+				if (!S)
+				{
+					return;
+				}
+				if (bWidth) { S->SetWidthOverride(Width); }
+				if (bHeight) { S->SetHeightOverride(Height); }
+				if (bMaxWidth) { S->SetMaxDesiredWidth(MaxWidth); }
+				if (bMaxHeight) { S->SetMaxDesiredHeight(MaxHeight); }
+			});
+			SizeBox->ClearWidthOverride();
+			SizeBox->ClearHeightOverride();
+			SizeBox->ClearMaxDesiredWidth();
+			SizeBox->ClearMaxDesiredHeight();
+		}
+
+		// Everything beside the path goes: the window's header and background, the filter list, the tabs.
+		// A switcher's other children are pages, not chrome, and it shows only one anyway.
+		UPanelWidget* Panel = Cast<UPanelWidget>(Parent);
+		if (!OnPath.Contains(Widget) || !Panel || !Panel->CanHaveMultipleChildren() || Panel->IsA<UWidgetSwitcher>())
+		{
+			continue;
+		}
+		for (UWidget* Sibling : Panel->GetAllChildren())
+		{
+			if (!Sibling || OnPath.Contains(Sibling) || KeepVisible(Sibling) || Sibling->GetVisibility() == ESlateVisibility::Collapsed)
+			{
+				continue;
+			}
+			FullscreenUndo.Add([Weak = TWeakObjectPtr<UWidget>(Sibling), Visibility = Sibling->GetVisibility()]()
+			{
+				if (UWidget* W = Weak.Get())
+				{
+					W->SetVisibility(Visibility);
+				}
+			});
+			FullscreenHidden.Add(Sibling);
+			Sibling->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+	UE_LOG(LogFactoryAtlas, Display, TEXT("Fullscreen on: %d changes, %d widgets hidden"), FullscreenUndo.Num(), FullscreenHidden.Num());
+	// Layout runs on the next frames; a few in, the sizes are settled.
+	FullscreenLogFrames = 3;
+}
+
+void UAtlasMapHud::LogFullscreenChain(const TCHAR* When) const
+{
+	FVector2D ViewportSize = FVector2D::ZeroVector;
+	if (GEngine && GEngine->GameViewport)
+	{
+		GEngine->GameViewport->GetViewportSize(ViewportSize);
+	}
+	UE_LOG(LogFactoryAtlas, Display, TEXT("Fullscreen layout %s, viewport %.0f x %.0f:"), When, ViewportSize.X, ViewportSize.Y);
+
+	const auto Line = [](const UWidget* Widget, int32 Depth)
+	{
+		const FGeometry& Geometry = Widget->GetCachedGeometry();
+		const FVector2D Position = Geometry.GetAbsolutePosition();
+		const FVector2D Size = Geometry.GetAbsoluteSize();
+		UE_LOG(LogFactoryAtlas, Display, TEXT("  %s%s (%s) slot %s, vis %d, at %.0f,%.0f size %.0f x %.0f"), *FString::ChrN(Depth * 2, TEXT(' ')),
+			*Widget->GetName(), *Widget->GetClass()->GetName(), Widget->Slot ? *Widget->Slot->GetClass()->GetName() : TEXT("none"),
+			int32(Widget->GetVisibility()), Position.X, Position.Y, Size.X, Size.Y);
+	};
+	for (int32 i = FullscreenChain.Num() - 1; i >= 0; i--)
+	{
+		if (const UWidget* Widget = FullscreenChain[i].Get())
+		{
+			Line(Widget, 0);
+		}
+	}
+
+	// Inside the map itself, a few levels down, in case it keeps its own size.
+	const UUserWidget* Map = FullscreenChain.Num() > 0 ? Cast<UUserWidget>(FullscreenChain[0].Get()) : nullptr;
+	if (!Map || !Map->WidgetTree || !Map->WidgetTree->RootWidget)
+	{
+		return;
+	}
+	TFunction<void(UWidget*, int32)> Down = [&](UWidget* Widget, int32 Depth)
+	{
+		Line(Widget, Depth);
+		const UPanelWidget* Panel = Cast<UPanelWidget>(Widget);
+		if (Depth >= 4 || !Panel)
+		{
+			return;
+		}
+		for (UWidget* Child : Panel->GetAllChildren())
+		{
+			if (Child)
+			{
+				Down(Child, Depth + 1);
+			}
+		}
+	};
+	Down(Map->WidgetTree->RootWidget, 1);
+}
+
+void UAtlasMapHud::RestoreFullscreen()
+{
+	bFullscreenApplied = false;
+	FullscreenHidden.Reset();
+	for (int32 i = FullscreenUndo.Num() - 1; i >= 0; i--)
+	{
+		FullscreenUndo[i]();
+	}
+	FullscreenUndo.Reset();
 }

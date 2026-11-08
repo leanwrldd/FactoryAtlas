@@ -9,6 +9,7 @@
 
 class UAtlasSubsystem;
 class UMaterialInstanceDynamic;
+class UTexture2D;
 struct FSlateBrush;
 
 /**
@@ -55,6 +56,14 @@ private:
 	FVector4f SelectionRecord = FVector4f::Zero();
 
 	void UpdateMarkers(UAtlasSubsystem& Atlas);
+
+	/** Draws each production building's recipe icon on top of it once the map is zoomed in far enough. Returns the top layer used. */
+	int32 PaintRecipeIcons(UAtlasSubsystem& Atlas, FSlateWindowElementList& OutDrawElements, int32 LayerId,
+		FVector2f Origin, FVector2f Scale, float PixelsPerMetre, const FSlateRect& CullingRect);
+	const FSlateBrush* IconBrush(UTexture2D* Icon);
+	TMap<UTexture2D*, TSharedPtr<FSlateBrush>> IconBrushes;
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UTexture2D>> IconTextures;
 	TSharedPtr<ISlateUpdatableInstanceBuffer> MarkerBuffer;
 	uint32 MarkerVersion = 0;
 	int32 MarkerCount = 0;

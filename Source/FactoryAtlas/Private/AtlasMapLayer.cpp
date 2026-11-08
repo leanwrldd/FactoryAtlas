@@ -1,6 +1,8 @@
 #include "AtlasMapLayer.h"
 
 #include "AtlasSubsystem.h"
+#include "Brushes/SlateRoundedBoxBrush.h"
+#include "Engine/Texture2D.h"
 #include "FactoryAtlas.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Interfaces/ISlateRHIRendererModule.h"
@@ -17,6 +19,12 @@ namespace
 {
 	constexpr int64 UploadBudgetBytes = 16 * 1024 * 1024;
 	constexpr double HoverIntervalSeconds = 0.08;
+
+	// Recipe icons appear from this zoom on, sized to the building's shorter side within these limits.
+	constexpr float IconMinPixelsPerMetre = 1.5f;
+	constexpr float IconFill = 0.7f;
+	constexpr float IconMinPixels = 12.f;
+	constexpr float IconMaxPixels = 48.f;
 
 	ISlateRHIRendererModule& Renderer()
 	{
@@ -63,6 +71,8 @@ void UAtlasMapLayer::NativeDestruct()
 	MarkerVersion = 0;
 	MarkerCount = 0;
 	SelectionBuffer.Reset();
+	IconBrushes.Reset();
+	IconTextures.Reset();
 	bHighlightReady = false;
 	if (UAtlasSubsystem* Atlas = UAtlasSubsystem::GetActive())
 	{
@@ -232,6 +242,62 @@ void UAtlasMapLayer::UpdateMarkers(UAtlasSubsystem& Atlas)
 	MarkerBuffer->Update(Data);
 }
 
+const FSlateBrush* UAtlasMapLayer::IconBrush(UTexture2D* Icon)
+{
+	if (const TSharedPtr<FSlateBrush>* Found = IconBrushes.Find(Icon))
+	{
+		return Found->Get();
+	}
+	TSharedPtr<FSlateBrush> Made = MakeShared<FSlateBrush>();
+	Made->SetResourceObject(Icon);
+	Made->ImageSize = FVector2D(Icon->GetSizeX(), Icon->GetSizeY());
+	IconBrushes.Add(Icon, Made);
+	IconTextures.Add(Icon);
+	return Made.Get();
+}
+
+int32 UAtlasMapLayer::PaintRecipeIcons(UAtlasSubsystem& Atlas, FSlateWindowElementList& OutDrawElements, int32 LayerId,
+	FVector2f Origin, FVector2f Scale, float PixelsPerMetre, const FSlateRect& CullingRect)
+{
+	static const FSlateRoundedBoxBrush Backdrop(FLinearColor::White, 5.f);
+	const FLinearColor BackdropColor(0.02f, 0.025f, 0.03f, 0.72f);
+
+	const FVector2f Filter = Atlas.GetHeightFilter();
+	const int32 ZLow = MetresToZ(Filter.X);
+	const int32 ZHigh = MetresToZ(Filter.Y);
+	const TArray<FType>& Types = Atlas.GetTypes();
+	bool bDrew = false;
+	for (const FRecipeIcon& Entry : Atlas.GetRecipeIcons())
+	{
+		if (!Types.IsValidIndex(Entry.Type) || Types[Entry.Type].bHidden || Atlas.IsCategoryHidden(Types[Entry.Type].Category))
+		{
+			continue;
+		}
+		const int32 Z = MetresToZ(float(Entry.Location.Z / 100.0));
+		if (Z < ZLow || Z > ZHigh)
+		{
+			continue;
+		}
+
+		const float Size = FMath::Clamp(Entry.HalfCm * 2.f / 100.f * PixelsPerMetre * IconFill, IconMinPixels, IconMaxPixels);
+		const FVector2f Uv(float((Entry.Location.X - MapWestCm) / MapWidthCm), float((Entry.Location.Y - MapNorthCm) / MapHeightCm));
+		const FVector2f Center = Origin + Scale * Uv;
+		const float Pad = FMath::RoundToFloat(Size * 0.14f);
+		const float Reach = Size * 0.5f + Pad;
+		if (Center.X + Reach < CullingRect.Left || Center.X - Reach > CullingRect.Right || Center.Y + Reach < CullingRect.Top || Center.Y - Reach > CullingRect.Bottom)
+		{
+			continue;
+		}
+
+		const FVector2f Corner(FMath::RoundToFloat(Center.X - Size * 0.5f), FMath::RoundToFloat(Center.Y - Size * 0.5f));
+		FSlateDrawElement::MakeBox(OutDrawElements, LayerId, FPaintGeometry(Corner - FVector2f(Pad), FVector2f(Size + Pad * 2.f), 1.f),
+			&Backdrop, ESlateDrawEffect::None, BackdropColor);
+		FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 1, FPaintGeometry(Corner, FVector2f(Size), 1.f), IconBrush(Entry.Icon));
+		bDrew = true;
+	}
+	return bDrew ? LayerId + 1 : LayerId - 1;
+}
+
 void UAtlasMapLayer::UpdateHover(UAtlasSubsystem& Atlas, const FGeometry& Geometry, float PixelsPerMetre)
 {
 	const FSettings& Settings = Atlas.GetSettings();
@@ -243,7 +309,8 @@ void UAtlasMapLayer::UpdateHover(UAtlasSubsystem& Atlas, const FGeometry& Geomet
 
 	const double Now = FPlatformTime::Seconds();
 	const FVector2f Pointer(FSlateApplication::Get().GetCursorPos());
-	if (Now - LastHoverSeconds >= HoverIntervalSeconds && !Pointer.Equals(LastCursor, 0.5f))
+	const double Interval = Atlas.WantsHoverEveryFrame() ? 0.0 : HoverIntervalSeconds;
+	if (Now - LastHoverSeconds >= Interval && !Pointer.Equals(LastCursor, 0.5f))
 	{
 		LastHoverSeconds = Now;
 		LastCursor = Pointer;
@@ -297,6 +364,23 @@ int32 UAtlasMapLayer::NativePaint(const FPaintArgs& Args, const FGeometry& Allot
 	Atlas->EnsureScanned();
 	Atlas->Pump();
 	Self->ApplyZoomLimit(Atlas->GetSettings().ZoomFactor);
+	const FVector2f Size(AllottedGeometry.GetLocalSize());
+	const FSlateRenderTransform& Transform = AllottedGeometry.GetAccumulatedRenderTransform();
+	const FVector2f Origin = Transform.TransformPoint(FVector2f::ZeroVector);
+	const FVector2f AxisX = Transform.TransformPoint(FVector2f(Size.X, 0.f)) - Origin;
+	const FVector2f AxisY = Transform.TransformPoint(FVector2f(0.f, Size.Y)) - Origin;
+	const FVector2f Scale(AxisX.X, AxisY.Y);
+	const float PixelsPerMetre = FMath::Abs(Scale.X) / MapWidthMetres;
+
+	// The configure panel follows the selected building as the map pans and zooms.
+	if (Atlas->HasSelection())
+	{
+		const FDecoded Record(Atlas->GetSelectionRecord());
+		const FVector2f Uv(float(Record.X) / PositionMax, float(Record.Y) / PositionMax);
+		const float ReachMetres = FVector2f(float(Record.HalfX), float(Record.HalfY)).Size() / 10.f;
+		Atlas->SetSelectionAnchor(Origin + Scale * Uv, ReachMetres * PixelsPerMetre);
+	}
+
 	const bool bBuildings = Atlas->IsLayerEnabled();
 	if ((!bBuildings && !Atlas->GetSettings().bRadiation && !Atlas->AnyMarkersShown()) || !Self->EnsureMaterial(*Atlas))
 	{
@@ -307,14 +391,6 @@ int32 UAtlasMapLayer::NativePaint(const FPaintArgs& Args, const FGeometry& Allot
 	Atlas->FlushPalette();
 	Self->UpdateParameters(*Atlas);
 	Self->Upload(*Atlas);
-
-	const FVector2f Size(AllottedGeometry.GetLocalSize());
-	const FSlateRenderTransform& Transform = AllottedGeometry.GetAccumulatedRenderTransform();
-	const FVector2f Origin = Transform.TransformPoint(FVector2f::ZeroVector);
-	const FVector2f AxisX = Transform.TransformPoint(FVector2f(Size.X, 0.f)) - Origin;
-	const FVector2f AxisY = Transform.TransformPoint(FVector2f(0.f, Size.Y)) - Origin;
-	const FVector2f Scale(AxisX.X, AxisY.Y);
-	const float PixelsPerMetre = FMath::Abs(Scale.X) / MapWidthMetres;
 
 	Self->UpdateHover(*Atlas, AllottedGeometry, PixelsPerMetre);
 
@@ -372,6 +448,11 @@ int32 UAtlasMapLayer::NativePaint(const FPaintArgs& Args, const FGeometry& Allot
 			TopLayer = DrawLayer + 1;
 			FSlateDrawElement::MakeCustomVerts(OutDrawElements, TopLayer, MaterialHandle, Vertices, Indices, RadiationBuffer.Get(), 0, uint32(RadiationCount));
 		}
+	}
+
+	if (bBuildings && Atlas->GetSettings().bRecipeIcons && PixelsPerMetre >= IconMinPixelsPerMetre)
+	{
+		TopLayer = Self->PaintRecipeIcons(*Atlas, OutDrawElements, TopLayer + 1, Origin, Scale, PixelsPerMetre, MyCullingRect);
 	}
 
 	if (Atlas->AnyMarkersShown())

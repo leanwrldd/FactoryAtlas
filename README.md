@@ -30,6 +30,7 @@ Mod reference: `FactoryAtlas`.
 - Resource nodes (sized by purity, hollow when in use), resource wells, geysers, spore flowers
   and gas pillars
 - Higher zoom limit than the base game (up to 8x)
+- Fullscreen mode: the map fills the whole map screen, without the game's window frame and filter list
 - Export the map as a PNG image (4096 or 8192 px)
 
 Settings are saved between sessions. The menu sits on the right of the map screen.
@@ -67,7 +68,10 @@ In testing, a million extra buildings drawn at full zoom out cost about 0.3 ms o
 2. Build the editor target (`FactoryEditor`).
 3. Generate the game feature data and the map material:
    `UnrealEditor-Cmd.exe <SML>\FactoryGame.uproject -run=pythonscript -script=<repo>\Scripts\create_assets.py -unattended -nosplash`
-4. Package with Alpakit.
+4. Import the Ctrl-click sounds (the WAVs are in `Scripts/Sounds`; `Scripts/synth_sounds.py` regenerates them):
+   `UnrealEditor-Cmd.exe <SML>\FactoryGame.uproject -run=pythonscript -script=<repo>\Scripts\import_sounds.py -unattended -nosplash`
+   It exits with code 1 because of a harmless "Decoder for AudioFormat 'BINKA' not found" check; the sounds are saved as PCM.
+5. Package with Alpakit.
 
 ## Credits
 

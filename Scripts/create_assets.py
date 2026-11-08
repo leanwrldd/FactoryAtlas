@@ -54,6 +54,8 @@ float4 pc = Pal.SampleLevel(PalSampler, float2((paint + 0.5) / 1024.0, 0.75), 0.
 float vis = (tc.a > 0.5 && (type > 980.5 || (zv >= ZMin && zv <= ZMax))) ? 1.0 : 0.0;
 float3 color = (PaintMode > 0.5 && paint > 0.5 && type < 980.5) ? pc.rgb : tc.rgb;
 float hollow = marker * fmod(paint, 2.0);
+// Path pieces (belts, pipes, rails, roads, wires) have palette alpha 200 rather than 255; see RebuildPalette.
+float path = (tc.a > 0.5 && tc.a < 0.9) ? 1.0 : 0.0;
 """
 
 CODE_POSITION = DECODE + """
@@ -69,7 +71,7 @@ return float3(P, 0.0);
 CODE_LOCAL = DECODE + "return C * ext;"
 CODE_HALF = DECODE + "return ph;"
 CODE_COLOR_RG = DECODE + "return color.rg;"
-CODE_COLOR_B = DECODE + "return float2(color.b, circle + marker * (2.0 + hollow));"
+CODE_COLOR_B = DECODE + "return float2(color.b, circle + marker * (2.0 + hollow) - path);"
 
 CODE_COLOR = """
 float3 c = float3(RG.x, RG.y, BA.x);
@@ -90,7 +92,9 @@ if (BA.y > 0.5)
 }
 float2 d = H - abs(L);
 float cov = saturate(d.x + 0.5) * saturate(d.y + 0.5);
-if (Outlines > 0.5 && min(H.x, H.y) > 2.5) { c *= lerp(0.6, 1.0, saturate(min(d.x, d.y) / 1.25)); }
+// A path piece is outlined along its sides only, so the pieces read as one continuous path.
+float rim = BA.y < -0.5 ? d.y : min(d.x, d.y);
+if (Outlines > 0.5 && min(H.x, H.y) > 2.5) { c *= lerp(0.6, 1.0, saturate(rim / 1.25)); }
 return float4(c, cov * Opacity);
 """
 

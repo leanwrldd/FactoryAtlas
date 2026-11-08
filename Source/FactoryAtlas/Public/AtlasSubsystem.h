@@ -2,18 +2,25 @@
 
 #include "CoreMinimal.h"
 #include "AtlasTypes.h"
+#include "FGFactoryColoringTypes.h"
+#include "FGLightweightBuildableSubsystem.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "Tasks/Task.h"
 #include "AtlasSubsystem.generated.h"
 
 class AFGBuildable;
+class AFGBuildableManufacturer;
 class AFGGameState;
 class UTexture2D;
+class USoundBase;
 struct FFactoryCustomizationData;
 struct FRuntimeBuildableInstanceData;
 
 namespace Atlas
 {
+	/** The sounds Ctrl-clicks on the map make. */
+	enum class EClipboardSound : uint8 { Copy, Paste, Error, Count };
+
 	/** SplineComponent is for paths built from a plain spline component, such as truck paths. */
 	enum class EKind : uint8 { Box, Spline, SplineComponent, Wire, Beam, Skip };
 
@@ -63,6 +70,7 @@ namespace Atlas
 	{
 		bool bValid = false;
 		bool bAuthority = false;
+		bool bFactory = false; // A machine, so the clock, pause and recipe lines apply
 		bool bCanChangeClock = false;
 		bool bCanBoost = false;
 		bool bPaused = false;
@@ -89,6 +97,72 @@ namespace Atlas
 		FString Summary;
 	};
 
+	/** One color, pattern or material the selected building can take. */
+	struct FCustomizeOption
+	{
+		UClass* Desc = nullptr; // nullptr for "no pattern"
+		FText Name;
+		FLinearColor Primary = FLinearColor::White;   // Swatches only
+		FLinearColor Secondary = FLinearColor::White;
+		UTexture2D* Icon = nullptr;                   // Patterns and materials
+	};
+
+	/**
+	 * What the selected building accepts, worked out once per selection. An empty list means the building does
+	 * not take that kind of customization, and the panel leaves that section out.
+	 */
+	struct FCustomizeOptions
+	{
+		TArray<FCustomizeOption> Swatches;
+		TArray<FCustomizeOption> Patterns;
+		TArray<FCustomizeOption> Materials;
+		/** The game's custom color swatch, when it is unlocked and the building takes it. Finishes go with it. */
+		UClass* CustomSwatch = nullptr;
+		TArray<FCustomizeOption> Finishes;
+		/** Index into Materials of the one the building is made of now. */
+		int32 CurrentMaterial = INDEX_NONE;
+		/** Why materials are offered but cannot be changed right now, for example with other players connected. */
+		FText MaterialNote;
+	};
+
+	/**
+	 * The selected building's own settings beyond production: names, load modes, switches, flow limits, lights.
+	 * Each b-flag says the building has that setting; the panel shows only those. Read every frame.
+	 */
+	struct FControls
+	{
+		bool bHasName = false;   // Train, truck and drone stations, and anything with a building tag
+		FText Name;
+		bool bHasLoadMode = false; // Freight and fluid platforms, truck stations
+		bool bLoadMode = true;
+		bool bHasSwitch = false;   // Power switches
+		bool bSwitchOn = false;
+		bool bHasFlowLimit = false; // Pumps and valves, in m3/s
+		float FlowLimit = -1.f;     // -1 means no limit
+		float MaxFlow = 0.f;
+		bool bHasLight = false;
+		bool bLightOn = true;
+		bool bNightOnly = false;
+		float Intensity = 1.f;
+		int32 LightColorSlot = 0;
+		TArray<FLinearColor> LightColors; // The game's light color slots, shared by every light
+
+		bool Any() const { return bHasName || bHasLoadMode || bHasSwitch || bHasFlowLimit || bHasLight; }
+	};
+
+	/** The selected building's customization as it is now. Read every frame. */
+	struct FCustomizeState
+	{
+		UClass* Swatch = nullptr;
+		UClass* Pattern = nullptr;
+		UClass* Material = nullptr;
+		uint8 PatternRotation = 0;
+		bool bCustom = false; // Painted with the custom color swatch; the colors below apply
+		FLinearColor CustomPrimary = FLinearColor::White;   // Linear, as the game stores them
+		FLinearColor CustomSecondary = FLinearColor::White;
+		UClass* Finish = nullptr;
+	};
+
 	/** Everything on the Settings tab. Saved between sessions. */
 	struct FSettings
 	{
@@ -98,9 +172,19 @@ namespace Atlas
 		bool bHighlight = true;
 		bool bOutlines = true;
 		bool bRadiation = false;
+		bool bRecipeIcons = true;
 		float Opacity = 1.f;
 		int32 ExportSize = 8192;
 		int32 ZoomFactor = 4; // Times the game's own zoom limit
+	};
+
+	/** A production building and the icon of what it makes, drawn on top of it when the map is zoomed in. */
+	struct FRecipeIcon
+	{
+		FVector Location = FVector::ZeroVector;
+		float HalfCm = 0.f; // Half the building's shorter side
+		int32 Type = 0;
+		UTexture2D* Icon = nullptr;
 	};
 
 	struct FExportState
@@ -151,6 +235,12 @@ public:
 	void SetLayerEnabled(bool bEnabled);
 	bool IsPanelOpen() const { return bPanelOpen; }
 	void SetPanelOpen(bool bOpen);
+	/** The map fills the whole map screen, without the game's window frame and filter list. */
+	bool IsFullscreen() const { return bFullscreen; }
+	void SetFullscreen(bool bInFullscreen);
+	/** The building panel's color, pattern and material section is open rather than folded to one row. */
+	bool IsAppearanceOpen() const { return bAppearanceOpen; }
+	void SetAppearanceOpen(bool bOpen);
 	const Atlas::FSettings& GetSettings() const { return Settings; }
 	Atlas::FSettings& EditSettings() { return Settings; }
 	void ResetSettings();
@@ -196,11 +286,15 @@ public:
 	bool IsMarkerShown(int32 Type) const;
 
 	// Selection and configuration
-	/** Selects the factory under the cursor. Returns false when the hover is not a configurable building. */
+	/** Selects the building under the cursor. Returns false when it has nothing to configure or customize. */
 	bool SelectHovered();
 	void ClearSelection();
-	bool HasSelection() const { return Selected.IsValid(); }
+	bool HasSelection() const;
 	const FVector4f& GetSelectionRecord() const { return SelectionRecord; }
+	/** Where the map last drew the selected building, in window pixels, and how far it reaches from there. */
+	void SetSelectionAnchor(const FVector2f& Absolute, float RadiusPixels) { SelectionAnchor = Absolute; SelectionAnchorRadius = RadiusPixels; }
+	const FVector2f& GetSelectionAnchor() const { return SelectionAnchor; }
+	float GetSelectionAnchorRadius() const { return SelectionAnchorRadius; }
 	Atlas::FFactoryState GetSelectionState() const;
 	void SetSelectedClock(float Potential);
 	void SetSelectedPaused(bool bPaused);
@@ -209,6 +303,56 @@ public:
 	TArray<Atlas::FRecipeOption> GetSelectedRecipeOptions() const;
 	/** Changes the recipe the same way the machine's own screen does. Returns false if the game refused. */
 	bool SetSelectedRecipe(UClass* Recipe);
+
+	// Customization of the selection: colors, patterns and materials
+	/** Goes up whenever the selection or the options it offers change, so the panel knows to rebuild its lists. */
+	uint32 GetSelectionVersion() const { return SelectionVersion; }
+	const Atlas::FCustomizeOptions& GetCustomizeOptions() const { return CustomizeOptions; }
+	Atlas::FCustomizeState GetCustomizeState() const;
+	void SetSelectedSwatch(UClass* Swatch);
+	/** Paints the selection with the custom swatch. Colors are linear; Finish is nullptr or one of the offered finishes. */
+	void SetSelectedCustomColor(const FLinearColor& Primary, const FLinearColor& Secondary, UClass* Finish);
+	/** nullptr removes the pattern. */
+	void SetSelectedPattern(UClass* Pattern);
+	void RotateSelectedPattern();
+	void SetSelectedMaterial(UClass* Material);
+	/** The last customization the game refused, with the reason. Empty after one succeeds. */
+	const FText& GetCustomizeError() const { return CustomizeError; }
+
+	// Building settings: names, load modes, switches, flow limits, lights. All need the host.
+	Atlas::FControls GetControls() const;
+	void SetSelectedName(const FText& Name);
+	void SetSelectedLoadMode(bool bLoad);
+	void SetSelectedSwitch(bool bOn);
+	/** m3/s; negative removes the limit. */
+	void SetSelectedFlowLimit(float Limit);
+	void SetSelectedLight(bool bOn, bool bNightOnly, float Intensity, int32 ColorSlot);
+
+	// Copy and paste. Machine settings go through the game's own clipboard, the one Ctrl+C and Ctrl+V on a
+	// building use, so the two share it. Color, pattern and material are kept here, since the game has no clipboard for them.
+	bool CanCopySelected() const;
+	void CopySelected();
+	/** True when the clipboard holds anything the selection can take. */
+	bool CanPasteToSelected() const;
+	void PasteToSelected();
+	/** What the last copy or paste did, for the panel. Cleared when the selection changes. */
+	const FText& GetClipboardStatus() const { return ClipboardStatus; }
+	void SetClipboardStatus(const FText& Status) { ClipboardStatus = Status; }
+
+	/**
+	 * Ctrl-clicks on the map: copy from, or paste onto, the building under the cursor without selecting it, so
+	 * the panel stays as it was. Done collects what a drag-paste has reached, so each building is pasted once.
+	 * False when there is no usable building there. What happened is shown as a toast.
+	 */
+	bool CopyHovered();
+	bool PasteHovered(TSet<const void*>* Done = nullptr);
+	void ShowToast(const FText& Text, bool bError = false);
+	/** Plays one of the Ctrl-click sounds. A sound asked for again within a moment of the last one is skipped. */
+	void PlayClipboardSound(Atlas::EClipboardSound Sound);
+	/** A short message by the cursor, while it lasts. */
+	bool GetToast(FText& OutText, bool& bOutError, float& OutAlpha) const;
+	/** Tells one selected building from another: its actor, or its instance's data for a lightweight. */
+	const void* GetSelectionIdentity() const;
 
 	/** The map widget's Slate widget, used to tell clicks on the map from clicks on menus drawn over it. */
 	void SetMapWidget(const TSharedPtr<SWidget>& Widget) { MapWidget = Widget; }
@@ -231,10 +375,17 @@ public:
 	const Atlas::FHover& GetHover() const { return Hover; }
 	void SetPointerOverPanel(bool bOver);
 	bool IsPointerOverPanel() const { return bPointerOverPanel; }
+	/** During a drag-paste the hover is worked out every frame rather than a few times a second, so no building is skipped. */
+	void SetHoverEveryFrame(bool bEveryFrame) { bHoverEveryFrame = bEveryFrame; }
+	bool WantsHoverEveryFrame() const { return bHoverEveryFrame; }
 
 	// Export
 	void StartExport();
 	FText GetExportStatus() const;
+
+	// Recipe icons
+	/** Production buildings with a recipe set. Rebuilt at most twice a second, so recipe changes show up quickly. */
+	const TArray<Atlas::FRecipeIcon>& GetRecipeIcons();
 
 private:
 	UFUNCTION()
@@ -276,6 +427,11 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UTexture2D> Palette;
+
+	/** Loaded on first use, by EClipboardSound. */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<USoundBase>> ClipboardSounds;
+	double LastClipboardSoundSeconds = 0.0;
 	TArray<FColor> PaletteData;
 	bool bPaletteDirty = true;
 
@@ -284,6 +440,8 @@ private:
 	bool bPaintMode = false;
 	bool bLayerEnabled = true;
 	bool bPanelOpen = true;
+	bool bFullscreen = false;
+	bool bAppearanceOpen = false;
 	bool bMenuDirty = true;
 	Atlas::FSettings Settings;
 
@@ -317,13 +475,48 @@ private:
 	bool bFeatureCacheLoaded = false;
 
 	TWeakObjectPtr<AFGBuildable> Selected;
+	/** Foundations, walls and the like have no actor; the game keeps them as instances of their class. */
+	FLightweightBuildableInstanceRef SelectedLightweight;
+	bool bSelectedLightweight = false;
+	uint32 SelectionVersion = 0;
+	Atlas::FCustomizeOptions CustomizeOptions;
+	FText CustomizeError;
+	/** Keeps the option icons loaded; the descriptors hold them only through soft pointers. */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UTexture2D>> CustomizeIcons;
+	void RefreshCustomizeOptions();
+	void SetSelectedPatternRotation(uint8 Rotation);
+	/** The copied look: whole customization data, plus the material by descriptor and name, since material families differ. */
+	TOptional<FFactoryCustomizationData> CopiedCustomization;
+	UClass* CopiedMaterial = nullptr;
+	FText CopiedMaterialName;
+	/** The machine's recipe and clock, applied after the game's own paste, which leaves the recipe alone from here. */
+	UClass* CopiedRecipe = nullptr;
+	TOptional<float> CopiedClock;
+	/** Selects the hovered building, runs Action on it, then puts the previous selection back. */
+	bool ActOnHovered(TFunctionRef<void()> Action, TSet<const void*>* Done);
+	FText Toast;
+	bool bToastError = false;
+	double ToastUntil = 0.0;
+	FText ClipboardStatus;
+	/** Applies new customization data to the selection and redraws it on the map. */
+	bool ApplySelectedCustomization(const FFactoryCustomizationData& Data);
 	FVector4f SelectionRecord = FVector4f::Zero();
+	FVector2f SelectionAnchor = FVector2f::ZeroVector;
+	float SelectionAnchorRadius = 0.f;
 	TWeakPtr<SWidget> MapWidget;
 	float FilterLow = -200.f;
 	float FilterHigh = 3895.f;
 
+	TSet<TWeakObjectPtr<AFGBuildableManufacturer>> Manufacturers;
+	TArray<Atlas::FRecipeIcon> RecipeIcons;
+	TMap<UClass*, UTexture2D*> RecipeIconCache;
+	double RecipeIconsSeconds = -1.0;
+	bool bRecipeIconsDirty = true;
+
 	Atlas::FHover Hover;
 	bool bPointerOverPanel = false;
+	bool bHoverEveryFrame = false;
 
 	TSharedPtr<Atlas::FExportState> ExportState;
 };

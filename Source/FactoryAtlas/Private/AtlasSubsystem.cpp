@@ -824,6 +824,71 @@ namespace
 		return true;
 	}
 
+	/**
+	 * A reflected call whose parameters are written through their FProperty, so the C++ struct layout never
+	 * has to match the UFunction's parameter block (a pointer and a bool are 9 bytes there, 16 in a C++ struct).
+	 */
+	class FReflectedCall
+	{
+	public:
+		FReflectedCall(UObject* InObject, const TCHAR* Name)
+			: Object(InObject)
+			, Function(InObject ? InObject->FindFunction(FName(Name)) : nullptr)
+		{
+			if (Function)
+			{
+				Buffer.SetNumZeroed(Function->ParmsSize);
+				Function->InitializeStruct(Buffer.GetData());
+			}
+		}
+
+		~FReflectedCall()
+		{
+			if (Function)
+			{
+				Function->DestroyStruct(Buffer.GetData());
+			}
+		}
+
+		bool IsValid() const { return Function != nullptr; }
+
+		/** The Index-th input parameter, if it exists and has the size of T. */
+		template <typename T>
+		T* Arg(int32 Index)
+		{
+			int32 Seen = 0;
+			for (TFieldIterator<FProperty> It(Function); It && It->HasAnyPropertyFlags(CPF_Parm); ++It)
+			{
+				if (It->HasAnyPropertyFlags(CPF_ReturnParm))
+				{
+					continue;
+				}
+				if (Seen++ == Index)
+				{
+					return It->GetSize() == sizeof(T) ? It->ContainerPtrToValuePtr<T>(Buffer.GetData()) : nullptr;
+				}
+			}
+			return nullptr;
+		}
+
+		template <typename T>
+		T* Return()
+		{
+			const FProperty* Property = Function ? Function->GetReturnProperty() : nullptr;
+			return Property && Property->GetSize() == sizeof(T) ? Property->ContainerPtrToValuePtr<T>(Buffer.GetData()) : nullptr;
+		}
+
+		void Invoke()
+		{
+			Object->ProcessEvent(Function, Buffer.GetData());
+		}
+
+	private:
+		UObject* Object;
+		UFunction* Function;
+		TArray<uint8, TInlineAllocator<64>> Buffer;
+	};
+
 	bool ReadBoolProperty(const UObject* Object, const TCHAR* Name)
 	{
 		const FBoolProperty* Property = FindFProperty<FBoolProperty>(Object->GetClass(), Name);
@@ -839,13 +904,14 @@ namespace
 		}
 
 		float Cycle = UFGRecipe::GetManufacturingDuration(Recipe);
-		if (UFunction* Function = Building->FindFunction(TEXT("GetProductionCycleTimeForRecipe")))
+		FReflectedCall Call(Building, TEXT("GetProductionCycleTimeForRecipe"));
+		if (TSubclassOf<UFGRecipe>* Argument = Call.IsValid() ? Call.Arg<TSubclassOf<UFGRecipe>>(0) : nullptr)
 		{
-			struct { TSubclassOf<UFGRecipe> Recipe; float ReturnValue; } Params{ Recipe, 0.f };
-			if (Function->ParmsSize == sizeof(Params))
+			*Argument = Recipe;
+			Call.Invoke();
+			if (const float* Result = Call.Return<float>(); Result && *Result > 0.f)
 			{
-				Building->ProcessEvent(Function, &Params);
-				Cycle = Params.ReturnValue > 0.f ? Params.ReturnValue : Cycle;
+				Cycle = *Result;
 			}
 		}
 		const float PerMinute = Cycle > 0.f ? 60.f / Cycle * FMath::Max(Potential, 0.01f) : 0.f;
@@ -874,13 +940,61 @@ bool UAtlasSubsystem::SelectHovered()
 	}
 	UClass* Class = Types[Hover.Type].Class;
 	AFGBuildableSubsystem* Buildables = AFGBuildableSubsystem::Get(GetWorld());
-	if (!Class || !Buildables || !Class->IsChildOf<AFGBuildableFactory>())
+	AFGLightweightBuildableSubsystem* Lightweights = AFGLightweightBuildableSubsystem::Get(GetWorld());
+	if (!Class || !Buildables || !Lightweights || !Class->IsChildOf<AFGBuildable>())
 	{
 		return false;
 	}
 
-	// Records keep no actor handle, so find the actor whose own record is the one under the cursor.
+	// Keeps the selection only if there is something to do with it: a machine, or a building that takes a
+	// color, pattern or material.
+	const auto Accept = [this, Class]()
+	{
+		RefreshCustomizeOptions();
+		const bool bUseful = Class->IsChildOf<AFGBuildableFactory>() || !CustomizeOptions.Swatches.IsEmpty()
+			|| !CustomizeOptions.Patterns.IsEmpty() || !CustomizeOptions.Materials.IsEmpty() || GetControls().Any();
+		if (!bUseful)
+		{
+			ClearSelection();
+			return false;
+		}
+		const FDecoded Record(Hover.Source);
+		SelectionRecord = Encode(Record.X, Record.Y, Record.Z, Record.HalfX, Record.HalfY, Record.Angle, HighlightType, 0);
+		SelectionVersion++;
+		return true;
+	};
+
+	// Records keep no handle, so find the building whose own record is the one under the cursor.
 	const FType& Type = Types[Hover.Type];
+	if (GetDefault<AFGBuildable>(Class)->ManagedByLightweightBuildableSubsystem())
+	{
+		const TArray<FRuntimeBuildableInstanceData>* Instances = Lightweights->GetAllLightweightBuildableInstances().Find(Class);
+		for (int32 Index = 0; Instances && Index < Instances->Num(); Index++)
+		{
+			const FRuntimeBuildableInstanceData& Data = (*Instances)[Index];
+			if (!Data.IsValid())
+			{
+				continue;
+			}
+			bool bMatch = false;
+			auto Sink = [this, &bMatch](const FVector4f& Record) { bMatch |= SameBuilding(Record, Hover.Source); };
+			EmitLightweight(Data, Type, Hover.Type, 0, Sink);
+			if (bMatch)
+			{
+				// Selecting it again would rebuild the panel for nothing, which shows as a flicker.
+				if (bSelectedLightweight && SelectedLightweight.ResolveBuildableInstanceData() == &Data)
+				{
+					return true;
+				}
+				ClearSelection();
+				SelectedLightweight.Initialize(Lightweights, Class, Index);
+				bSelectedLightweight = true;
+				return Accept();
+			}
+		}
+		return false;
+	}
+
 	for (AFGBuildable* Buildable : Buildables->GetAllBuildablesRef())
 	{
 		if (!Buildable || Buildable->GetClass() != Class)
@@ -892,10 +1006,13 @@ bool UAtlasSubsystem::SelectHovered()
 		EmitActor(Buildable, Type, Hover.Type, 0, Sink);
 		if (bMatch)
 		{
+			if (!bSelectedLightweight && Selected.Get() == Buildable)
+			{
+				return true;
+			}
+			ClearSelection();
 			Selected = Buildable;
-			const FDecoded Record(Hover.Source);
-			SelectionRecord = Encode(Record.X, Record.Y, Record.Z, Record.HalfX, Record.HalfY, Record.Angle, HighlightType, 0);
-			return true;
+			return Accept();
 		}
 	}
 	return false;
@@ -904,11 +1021,37 @@ bool UAtlasSubsystem::SelectHovered()
 void UAtlasSubsystem::ClearSelection()
 {
 	Selected.Reset();
+	SelectedLightweight = FLightweightBuildableInstanceRef();
+	bSelectedLightweight = false;
+	CustomizeOptions = FCustomizeOptions();
+	CustomizeIcons.Reset();
+	CustomizeError = FText::GetEmpty();
+	ClipboardStatus = FText::GetEmpty();
+	SelectionVersion++;
+}
+
+bool UAtlasSubsystem::HasSelection() const
+{
+	return bSelectedLightweight ? SelectedLightweight.IsValid() : Selected.IsValid();
 }
 
 FFactoryState UAtlasSubsystem::GetSelectionState() const
 {
 	FFactoryState State;
+	if (bSelectedLightweight)
+	{
+		if (SelectedLightweight.IsValid())
+		{
+			State.bValid = true;
+			State.bAuthority = GetWorld()->GetNetMode() != NM_Client;
+			if (const int32* TypeId = TypeIndex.Find(SelectedLightweight.GetBuildableClass()))
+			{
+				State.Name = Types[*TypeId].Name;
+			}
+		}
+		return State;
+	}
+
 	AFGBuildable* Building = Selected.Get();
 	if (!Building)
 	{
@@ -920,6 +1063,10 @@ FFactoryState UAtlasSubsystem::GetSelectionState() const
 	if (const int32* TypeId = TypeIndex.Find(Building->GetClass()))
 	{
 		State.Name = Types[*TypeId].Name;
+	}
+	if (!Building->IsA<AFGBuildableFactory>())
+	{
+		return State;
 	}
 
 	CallGetter(Building, TEXT("GetCanChangePotential"), State.bCanChangeClock);
@@ -948,6 +1095,8 @@ FFactoryState UAtlasSubsystem::GetSelectionState() const
 			State.RecipeSummary = DescribeRecipe(Building, Recipe, State.Pending);
 		}
 	}
+	// Storage, platforms and pumps are factories to the game too, but have no clock or recipe to show.
+	State.bFactory = State.bCanChangeClock || State.bHasRecipes;
 	return State;
 }
 
@@ -1002,23 +1151,32 @@ bool UAtlasSubsystem::SetSelectedRecipe(UClass* Recipe)
 
 	for (const TCHAR* Name : { TEXT("MoveOrDropInputInventory"), TEXT("MoveOrDropOutputInventory") })
 	{
-		UFunction* Function = Building->FindFunction(Name);
-		struct { AFGCharacterPlayer* Pawn; bool ReturnValue; } Params{ Pawn, false };
-		if (!Function || Function->ParmsSize != sizeof(Params))
+		FReflectedCall Call(Building, Name);
+		AFGCharacterPlayer** Argument = Call.IsValid() ? Call.Arg<AFGCharacterPlayer*>(0) : nullptr;
+		if (!Argument)
 		{
 			UE_LOG(LogFactoryAtlas, Warning, TEXT("Recipe change skipped: %s not found"), Name);
 			return false;
 		}
-		Building->ProcessEvent(Function, &Params);
+		*Argument = Pawn;
+		Call.Invoke();
 	}
 
-	TSubclassOf<UFGRecipe> NewRecipe = Recipe;
-	if (!CallSetter(Building, TEXT("SetRecipe"), NewRecipe))
+	FReflectedCall SetRecipe(Building, TEXT("SetRecipe"));
+	TSubclassOf<UFGRecipe>* Argument = SetRecipe.IsValid() ? SetRecipe.Arg<TSubclassOf<UFGRecipe>>(0) : nullptr;
+	if (!Argument)
 	{
+		UE_LOG(LogFactoryAtlas, Warning, TEXT("Recipe change skipped: SetRecipe not found"));
 		return false;
 	}
-	UE_LOG(LogFactoryAtlas, Display, TEXT("Recipe of %s set to %s"), *Building->GetName(), *Recipe->GetName());
-	return true;
+	*Argument = Recipe;
+	SetRecipe.Invoke();
+	bRecipeIconsDirty = true;
+
+	TSubclassOf<UFGRecipe> Now;
+	CallGetter(Building, TEXT("GetCurrentRecipe"), Now);
+	UE_LOG(LogFactoryAtlas, Display, TEXT("Recipe of %s set to %s, machine now reports %s"), *Building->GetName(), *Recipe->GetName(), *GetNameSafe(Now.Get()));
+	return Now.Get() == Recipe;
 }
 
 void UAtlasSubsystem::SetSelectedClock(float Potential)
@@ -1432,6 +1590,8 @@ void UAtlasSubsystem::Scan()
 	}
 	auto Sink = [&Fresh](const FVector4f& Record) { Fresh->Cells[CellOf(Record)].Add(Record); };
 
+	Manufacturers.Reset();
+	bRecipeIconsDirty = true;
 	int64 Actors = 0;
 	for (AFGBuildable* Buildable : Buildables->GetAllBuildablesRef())
 	{
@@ -1444,6 +1604,10 @@ void UAtlasSubsystem::Scan()
 		EmitActor(Buildable, Type, TypeId, PaintFor(Buildable->GetCustomizationData_Native()), Sink);
 		Type.Count++;
 		Actors++;
+		if (AFGBuildableManufacturer* Manufacturer = Cast<AFGBuildableManufacturer>(Buildable))
+		{
+			Manufacturers.Add(Manufacturer);
+		}
 	}
 
 	int64 Instances = 0;
@@ -1555,6 +1719,18 @@ void UAtlasSubsystem::QueueActor(AFGBuildable* Buildable, bool bAdded)
 	EmitActor(Buildable, Type, TypeId, bAdded ? PaintFor(Buildable->GetCustomizationData_Native()) : 0, Sink);
 	Type.Count = FMath::Max(0, Type.Count + (bAdded ? 1 : -1));
 	bMenuDirty = true;
+	if (AFGBuildableManufacturer* Manufacturer = Cast<AFGBuildableManufacturer>(Buildable))
+	{
+		if (bAdded)
+		{
+			Manufacturers.Add(Manufacturer);
+		}
+		else
+		{
+			Manufacturers.Remove(Manufacturer);
+		}
+		bRecipeIconsDirty = true;
+	}
 
 	if (PendingOps.Num() > MaxQueuedOps)
 	{
@@ -1590,6 +1766,59 @@ void UAtlasSubsystem::HandleLightweight(UClass* Class, const FRuntimeBuildableIn
 	{
 		Pump();
 	}
+}
+
+const TArray<FRecipeIcon>& UAtlasSubsystem::GetRecipeIcons()
+{
+	const double Now = FPlatformTime::Seconds();
+	if (!bRecipeIconsDirty && Now - RecipeIconsSeconds < 0.5)
+	{
+		return RecipeIcons;
+	}
+	bRecipeIconsDirty = false;
+	RecipeIconsSeconds = Now;
+	RecipeIcons.Reset();
+
+	for (auto It = Manufacturers.CreateIterator(); It; ++It)
+	{
+		AFGBuildableManufacturer* Building = It->Get();
+		if (!Building)
+		{
+			It.RemoveCurrent();
+			continue;
+		}
+		UClass* Recipe = Building->GetCurrentRecipe().Get();
+		const int32* TypeId = Recipe ? TypeIndex.Find(Building->GetClass()) : nullptr;
+		if (!TypeId)
+		{
+			continue;
+		}
+
+		// The first product is the one the recipe is named for; by-products come after it.
+		UTexture2D** Cached = RecipeIconCache.Find(Recipe);
+		if (!Cached)
+		{
+			UTexture2D* Icon = nullptr;
+			const TArray<FItemAmount> Products = UFGRecipe::GetProducts(Recipe);
+			if (Products.Num() > 0 && Products[0].ItemClass)
+			{
+				Icon = UFGItemDescriptor::GetSmallIcon(Products[0].ItemClass);
+			}
+			Cached = &RecipeIconCache.Add(Recipe, Icon);
+		}
+		if (!*Cached)
+		{
+			continue;
+		}
+
+		const FType& Type = Types[*TypeId];
+		FRecipeIcon& Entry = RecipeIcons.AddDefaulted_GetRef();
+		Entry.Location = Building->GetActorTransform().TransformPosition(Type.Center);
+		Entry.HalfCm = FMath::Min(Type.Half.X, Type.Half.Y);
+		Entry.Type = *TypeId;
+		Entry.Icon = *Cached;
+	}
+	return RecipeIcons;
 }
 
 void UAtlasSubsystem::SetCategoryHidden(ECategory Category, bool bHidden)
@@ -1646,6 +1875,24 @@ void UAtlasSubsystem::SetPanelOpen(bool bOpen)
 	}
 }
 
+void UAtlasSubsystem::SetAppearanceOpen(bool bOpen)
+{
+	if (bAppearanceOpen != bOpen)
+	{
+		bAppearanceOpen = bOpen;
+		SaveSettings();
+	}
+}
+
+void UAtlasSubsystem::SetFullscreen(bool bInFullscreen)
+{
+	if (bFullscreen != bInFullscreen)
+	{
+		bFullscreen = bInFullscreen;
+		SaveSettings();
+	}
+}
+
 FVector2f UAtlasSubsystem::GetHeightBounds() const
 {
 	const float Low = ZToMetres(Grid->ZLow);
@@ -1688,7 +1935,10 @@ void UAtlasSubsystem::RebuildPalette()
 	{
 		const FType& Type = Types[i];
 		FColor Color = Type.Color;
-		Color.A = (Type.bHidden || IsCategoryHidden(Type.Category)) ? 0 : 255;
+		// Alpha is visibility, and also tells the shader a path piece from a building: a path is one long shape
+		// drawn as many pieces, so it gets no outline where those pieces meet. See create_assets.py.
+		const bool bPath = Type.Kind == EKind::Spline || Type.Kind == EKind::SplineComponent || Type.Kind == EKind::Wire;
+		Color.A = (Type.bHidden || IsCategoryHidden(Type.Category)) ? 0 : (bPath ? 200 : 255);
 		PaletteData[i] = Color;
 	}
 	PaletteData[HighlightType] = FColor(226, 142, 66);
@@ -1908,6 +2158,7 @@ void UAtlasSubsystem::StartExport()
 					{
 						Color = Colors[MaxTypes + Record.Paint];
 					}
+					Color.A = 255; // The palette's alpha is a flag, not transparency.
 
 					const float CenterX = float(Record.X) / PositionMax * Size;
 					const float CenterY = float(Record.Y) / PositionMax * Size;
@@ -1970,6 +2221,8 @@ void UAtlasSubsystem::SaveSettings() const
 	Lines.Add(FString::Printf(TEXT("paint=%d"), bPaintMode ? 1 : 0));
 	Lines.Add(FString::Printf(TEXT("layer=%d"), bLayerEnabled ? 1 : 0));
 	Lines.Add(FString::Printf(TEXT("panel=%d"), bPanelOpen ? 1 : 0));
+	Lines.Add(FString::Printf(TEXT("fullscreen=%d"), bFullscreen ? 1 : 0));
+	Lines.Add(FString::Printf(TEXT("appearance=%d"), bAppearanceOpen ? 1 : 0));
 	Lines.Add(FString::Printf(TEXT("hoverLabel=%d"), Settings.bHoverLabel ? 1 : 0));
 	Lines.Add(FString::Printf(TEXT("hoverHeight=%d"), Settings.bHoverHeight ? 1 : 0));
 	Lines.Add(FString::Printf(TEXT("hoverCoordinates=%d"), Settings.bHoverCoordinates ? 1 : 0));
@@ -1978,6 +2231,7 @@ void UAtlasSubsystem::SaveSettings() const
 	Lines.Add(FString::Printf(TEXT("opacity=%.2f"), Settings.Opacity));
 	Lines.Add(FString::Printf(TEXT("exportSize=%d"), Settings.ExportSize));
 	Lines.Add(FString::Printf(TEXT("radiation=%d"), Settings.bRadiation ? 1 : 0));
+	Lines.Add(FString::Printf(TEXT("recipeIcons=%d"), Settings.bRecipeIcons ? 1 : 0));
 	Lines.Add(FString::Printf(TEXT("zoom=%d"), Settings.ZoomFactor));
 	Lines.Add(FString::Printf(TEXT("collectibles=%u"), CollectibleMask));
 	Lines.Add(FString::Printf(TEXT("features=%u"), FeatureMask));
@@ -2028,6 +2282,8 @@ void UAtlasSubsystem::LoadSettings()
 		if (Key == TEXT("paint")) { bPaintMode = Value == TEXT("1"); }
 		else if (Key == TEXT("layer")) { bLayerEnabled = Value == TEXT("1"); }
 		else if (Key == TEXT("panel")) { bPanelOpen = Value == TEXT("1"); }
+		else if (Key == TEXT("fullscreen")) { bFullscreen = Value == TEXT("1"); }
+		else if (Key == TEXT("appearance")) { bAppearanceOpen = Value == TEXT("1"); }
 		else if (Key == TEXT("hoverLabel")) { Settings.bHoverLabel = Value == TEXT("1"); }
 		else if (Key == TEXT("hoverHeight")) { Settings.bHoverHeight = Value == TEXT("1"); }
 		else if (Key == TEXT("hoverCoordinates")) { Settings.bHoverCoordinates = Value == TEXT("1"); }
@@ -2036,6 +2292,7 @@ void UAtlasSubsystem::LoadSettings()
 		else if (Key == TEXT("opacity")) { Settings.Opacity = FMath::Clamp(FCString::Atof(*Value), 0.2f, 1.f); }
 		else if (Key == TEXT("exportSize")) { Settings.ExportSize = FCString::Atoi(*Value) == 4096 ? 4096 : 8192; }
 		else if (Key == TEXT("radiation")) { Settings.bRadiation = Value == TEXT("1"); }
+		else if (Key == TEXT("recipeIcons")) { Settings.bRecipeIcons = Value == TEXT("1"); }
 		else if (Key == TEXT("collectibles")) { CollectibleMask = uint32(FCString::Atoi(*Value)) & ((1u << int32(ECollectible::Count)) - 1); }
 		else if (Key == TEXT("features")) { FeatureMask = uint32(FCString::Atoi(*Value)) & ((1u << int32(EFeature::Count)) - 1); }
 		else if (Key == TEXT("hiddenResource")) { HiddenResourcePaths.Add(Value); }
