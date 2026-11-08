@@ -672,7 +672,8 @@ public:
 			+ SOverlay::Slot()
 			.HAlign(HAlign_Center)
 			.VAlign(VAlign_Bottom)
-			.Padding(TAttribute<FMargin>::CreateLambda([this]() { return FMargin(0.f, 0.f, 0.f, HintInset + 14.f); }))
+			// 106 clears the game's own marker and stamp bar along the bottom of the map, about 90 tall.
+			.Padding(TAttribute<FMargin>::CreateLambda([this]() { return FMargin(0.f, 0.f, 0.f, HintInset + 106.f); }))
 			[
 				MakeShortcutBar()
 			]
