@@ -90,11 +90,16 @@ if (BA.y > 0.5)
     float glow = saturate(1.0 - r);
     return float4(c, glow * (0.25 + 0.35 * glow));
 }
+// A path piece (belt, pipe, rail, road, wire) is a capsule: round ends that overlap its neighbours by a full
+// width, so the pieces join into one smooth band. No outline, which would draw a ring at every joint.
+if (BA.y < -0.5)
+{
+    float2 q = float2(max(abs(L.x) - max(H.x - H.y, 0.0), 0.0), L.y);
+    return float4(c, saturate(H.y - length(q) + 0.5) * Opacity);
+}
 float2 d = H - abs(L);
 float cov = saturate(d.x + 0.5) * saturate(d.y + 0.5);
-// A path piece is outlined along its sides only, so the pieces read as one continuous path.
-float rim = BA.y < -0.5 ? d.y : min(d.x, d.y);
-if (Outlines > 0.5 && min(H.x, H.y) > 2.5) { c *= lerp(0.6, 1.0, saturate(rim / 1.25)); }
+if (Outlines > 0.5 && min(H.x, H.y) > 2.5) { c *= lerp(0.6, 1.0, saturate(min(d.x, d.y) / 1.25)); }
 return float4(c, cov * Opacity);
 """
 

@@ -40,7 +40,7 @@
 #include "Widgets/SLeafWidget.h"
 #include "Widgets/SOverlay.h"
 #include "Widgets/SToolTip.h"
-#include "Widgets/Layout/SUniformGridPanel.h"
+#include "Widgets/SViewport.h"
 #include "Widgets/Text/STextBlock.h"
 
 using namespace Atlas;
@@ -158,8 +158,11 @@ namespace
 			];
 	}
 
-	/** The map's mouse shortcuts, each a tile with its action over an orange key chip. */
-	TSharedPtr<IToolTip> MakeShortcutsTip()
+	/**
+	 * The map's mouse shortcuts along the bottom of the map, in the look of the game's own key hints: each a dark
+	 * tile with its action over an orange key chip. Clicks pass through it to the map.
+	 */
+	TSharedRef<SWidget> MakeShortcutBar()
 	{
 		const FAtlasStyle& Style = FAtlasStyle::Get();
 		static const TCHAR* const Shortcuts[][2] = {
@@ -170,12 +173,11 @@ namespace
 			{ TEXT("Close Settings"), TEXT("LMB Empty Map") },
 			{ TEXT("Zoom"), TEXT("Scroll") },
 		};
-		constexpr int32 Columns = 3;
 
-		const TSharedRef<SUniformGridPanel> Grid = SNew(SUniformGridPanel).SlotPadding(FMargin(2.f));
+		const TSharedRef<SHorizontalBox> Bar = SNew(SHorizontalBox).Visibility(EVisibility::HitTestInvisible);
 		for (int32 i = 0; i < UE_ARRAY_COUNT(Shortcuts); i++)
 		{
-			Grid->AddSlot(i % Columns, i / Columns)
+			Bar->AddSlot().AutoWidth().Padding(FMargin(2.f, 0.f))
 			[
 				SNew(SBorder)
 				.BorderImage(&Style.Tip)
@@ -198,12 +200,7 @@ namespace
 				]
 			];
 		}
-		return SNew(SToolTip)
-			.BorderImage(&Style.Clear)
-			.TextMargin(FMargin(0.f))
-			[
-				Grid
-			];
+		return Bar;
 	}
 
 	/**
@@ -671,6 +668,14 @@ public:
 					]
 				]
 			]
+			// Kept above the screen's bottom edge even when the map reaches past it; see HintInset.
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Bottom)
+			.Padding(TAttribute<FMargin>::CreateLambda([this]() { return FMargin(0.f, 0.f, 0.f, HintInset + 14.f); }))
+			[
+				MakeShortcutBar()
+			]
 			// Placed over the selected building each frame; see PlaceSelectionPanel.
 			+ SOverlay::Slot()
 			.HAlign(HAlign_Left)
@@ -798,13 +803,33 @@ public:
 			|| (SelectionPanel.IsValid() && Atlas->HasSelection() && SelectionPanel->GetTickSpaceGeometry().IsUnderLocation(Cursor));
 		Atlas->SetPointerOverPanel(bOverPanel);
 
+		// The map can reach past the bottom of the screen (the game's window frame keeps some of its height),
+		// so the hint bar is lifted by however much of this widget is below the viewport.
+		HintInset = 0.f;
+		if (GEngine && GEngine->GameViewport)
+		{
+			if (const TSharedPtr<SViewport> Viewport = GEngine->GameViewport->GetGameViewportWidget())
+			{
+				const FGeometry& ViewportGeometry = Viewport->GetTickSpaceGeometry();
+				const float ViewportBottom = float(ViewportGeometry.GetAbsolutePosition().Y + ViewportGeometry.GetAbsoluteSize().Y);
+				const float Bottom = float(AllottedGeometry.GetAbsolutePosition().Y + AllottedGeometry.GetAbsoluteSize().Y);
+				HintInset = FMath::Max(0.f, (Bottom - ViewportBottom) / FMath::Max(AllottedGeometry.Scale, 0.01f));
+			}
+		}
+
 		// Read once a frame; every line of the configure panel shows a piece of it.
+		const bool bWasValid = State.bValid;
 		State = Atlas->GetSelectionState();
 		Custom = Atlas->GetCustomizeState();
+		// Slate measures widgets before this Tick, which runs during paint. Rows built here, or shown because the
+		// state read here changed, would be drawn this frame at no size and pop in the next: the flash on a click.
+		// Measuring again after such a change lets this frame draw them right.
+		bool bRemeasure = State.bValid != bWasValid;
 		if (BuiltSelectionVersion != Atlas->GetSelectionVersion())
 		{
 			BuiltSelectionVersion = Atlas->GetSelectionVersion();
 			RebuildCustomizeLists(*Atlas);
+			bRemeasure = true;
 		}
 		SyncDraft(*Atlas);
 		bCanPaste = State.bValid && Atlas->CanPasteToSelected();
@@ -813,16 +838,22 @@ public:
 		{
 			BuiltLightSlots = Controls.LightColors.Num();
 			RebuildLightColors();
+			bRemeasure = true;
 		}
-		if (State.bValid)
-		{
-			PlaceSelectionPanel(AllottedGeometry, *Atlas);
-		}
-
 		if (Atlas->ConsumeMenuDirty() || bListDirty)
 		{
 			bListDirty = false;
 			RebuildList(*Atlas);
+			bRemeasure = true;
+		}
+		if (bRemeasure)
+		{
+			SlatePrepass(GetPrepassLayoutScaleMultiplier());
+		}
+		// After measuring, since where the panel goes depends on its size.
+		if (State.bValid)
+		{
+			PlaceSelectionPanel(AllottedGeometry, *Atlas);
 		}
 	}
 
@@ -970,18 +1001,6 @@ private:
 				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
 				[
 					MakeLabel(TEXT("Atlas"), Style.FontBold, FLinearColor::White)
-				]
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 2.f, 0.f))
-				[
-					// Hovered, not clicked: a button-like box whose tooltip lists what the map takes.
-					SNew(SBorder)
-					.BorderImage(&Style.Clear)
-					.Padding(FMargin(7.f, 0.f))
-					.ToolTip(MakeShortcutsTip())
-					[
-						SNew(STextBlock).Font(Style.FontBold).ColorAndOpacity(FSlateColor(FLinearColor::White))
-						.Text(FText::FromString(TEXT("?")))
-					]
 				]
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 				[
@@ -2614,6 +2633,8 @@ private:
 
 	TSharedPtr<SAtlasPanelBorder> Panel;
 	TSharedPtr<SAtlasPanelBorder> SelectionPanel;
+	/** Local units of this widget below the bottom of the screen; the hint bar sits above them. */
+	float HintInset = 0.f;
 	FVector2f SelectionOffset = FVector2f::ZeroVector;
 	FCustomizeState Custom;
 	uint32 BuiltSelectionVersion = MAX_uint32;
@@ -3010,6 +3031,20 @@ void UAtlasMapHud::ApplyFullscreen()
 
 	for (UWidget* Widget : Path)
 	{
+		// A render transform moves a widget after layout, so an offset left by the window's own layout or an
+		// animation would push the map past the screen's edge.
+		if (!Widget->GetRenderTransform().IsIdentity())
+		{
+			FullscreenUndo.Add([Weak = TWeakObjectPtr<UWidget>(Widget), Transform = Widget->GetRenderTransform()]()
+			{
+				if (UWidget* W = Weak.Get())
+				{
+					W->SetRenderTransform(Transform);
+				}
+			});
+			Widget->SetRenderTransform(FWidgetTransform());
+		}
+
 		// A user widget can pad its own content.
 		if (UUserWidget* User = Cast<UUserWidget>(Widget); User && User->GetPadding() != FMargin(0.f))
 		{
@@ -3124,6 +3159,7 @@ void UAtlasMapHud::ApplyFullscreen()
 			});
 			FullscreenHidden.Add(Sibling);
 			Sibling->SetVisibility(ESlateVisibility::Collapsed);
+			UE_LOG(LogFactoryAtlas, Display, TEXT("Fullscreen hides %s (%s) in %s"), *Sibling->GetName(), *Sibling->GetClass()->GetName(), *Panel->GetName());
 		}
 	}
 	UE_LOG(LogFactoryAtlas, Display, TEXT("Fullscreen on: %d changes, %d widgets hidden"), FullscreenUndo.Num(), FullscreenHidden.Num());
@@ -3145,15 +3181,30 @@ void UAtlasMapHud::LogFullscreenChain(const TCHAR* When) const
 		const FGeometry& Geometry = Widget->GetCachedGeometry();
 		const FVector2D Position = Geometry.GetAbsolutePosition();
 		const FVector2D Size = Geometry.GetAbsoluteSize();
-		UE_LOG(LogFactoryAtlas, Display, TEXT("  %s%s (%s) slot %s, vis %d, at %.0f,%.0f size %.0f x %.0f"), *FString::ChrN(Depth * 2, TEXT(' ')),
+		const FVector2D Shift = Widget->GetRenderTransform().Translation;
+		UE_LOG(LogFactoryAtlas, Display, TEXT("  %s%s (%s) slot %s, vis %d, at %.0f,%.0f size %.0f x %.0f, shift %.0f,%.0f"), *FString::ChrN(Depth * 2, TEXT(' ')),
 			*Widget->GetName(), *Widget->GetClass()->GetName(), Widget->Slot ? *Widget->Slot->GetClass()->GetName() : TEXT("none"),
-			int32(Widget->GetVisibility()), Position.X, Position.Y, Size.X, Size.Y);
+			int32(Widget->GetVisibility()), Position.X, Position.Y, Size.X, Size.Y, Shift.X, Shift.Y);
 	};
 	for (int32 i = FullscreenChain.Num() - 1; i >= 0; i--)
 	{
-		if (const UWidget* Widget = FullscreenChain[i].Get())
+		const UWidget* Widget = FullscreenChain[i].Get();
+		if (!Widget)
 		{
-			Line(Widget, 0);
+			continue;
+		}
+		Line(Widget, 0);
+		// The holder's other children, which are what can still take room beside the map.
+		const UWidget* OnPath = i > 0 ? FullscreenChain[i - 1].Get() : nullptr;
+		if (const UPanelWidget* Panel = Cast<UPanelWidget>(Widget); Panel && OnPath && OnPath->GetParent() == Panel)
+		{
+			for (const UWidget* Child : Panel->GetAllChildren())
+			{
+				if (Child && Child != OnPath)
+				{
+					Line(Child, 2);
+				}
+			}
 		}
 	}
 

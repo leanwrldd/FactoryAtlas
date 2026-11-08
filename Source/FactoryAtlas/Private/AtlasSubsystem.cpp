@@ -266,19 +266,30 @@ namespace
 	template <typename FSink>
 	void EmitSpan(const FVector& P0, const FVector& T0, const FVector& P1, const FVector& T1, const FType& Type, int32 TypeId, int32 Paint, FSink& Sink);
 
+	/** Belts, pipes, rails, roads and wires: one long shape drawn as many pieces, which the shader joins up. */
+	bool IsPathKind(EKind Kind)
+	{
+		return Kind == EKind::Spline || Kind == EKind::SplineComponent || Kind == EKind::Wire;
+	}
+
 	template <typename FSink>
 	void EmitSegment(const FVector& A, const FVector& B, const FType& Type, int32 TypeId, int32 Paint, FSink& Sink)
 	{
 		const FVector Delta = B - A;
-		const float HalfLength = float(Delta.Size2D() * 0.5) + 15.f;
+		const double Length = Delta.Size2D();
 		const float Radians = float(FMath::Atan2(Delta.Y, Delta.X));
-		const int32 Pieces = FMath::Max(1, FMath::CeilToInt32(HalfLength / MaxSegmentHalfCm));
+		const int32 Pieces = FMath::Max(1, FMath::CeilToInt32(Length * 0.5 / MaxSegmentHalfCm));
+		// A path piece is drawn as a capsule, round at both ends, so it reaches half its width past each joint.
+		// Neighbours then overlap by a full width and a bend reads as one smooth curve at any zoom. Anything else
+		// overlaps a little, to hide the seam.
+		const float Reach = IsPathKind(Type.Kind) ? Type.HalfWidthCm : 15.f;
+		const float HalfLength = float(Length / Pieces * 0.5) + Reach;
 
 		FVector4f Record;
 		for (int32 Piece = 0; Piece < Pieces; Piece++)
 		{
 			const FVector Center = A + Delta * ((Piece + 0.5) / Pieces);
-			if (EncodeWorld(Center, HalfLength / Pieces, Type.HalfWidthCm, Radians, TypeId, Paint, Record))
+			if (EncodeWorld(Center, HalfLength, Type.HalfWidthCm, Radians, TypeId, Paint, Record))
 			{
 				Sink(Record);
 			}
@@ -1937,8 +1948,7 @@ void UAtlasSubsystem::RebuildPalette()
 		FColor Color = Type.Color;
 		// Alpha is visibility, and also tells the shader a path piece from a building: a path is one long shape
 		// drawn as many pieces, so it gets no outline where those pieces meet. See create_assets.py.
-		const bool bPath = Type.Kind == EKind::Spline || Type.Kind == EKind::SplineComponent || Type.Kind == EKind::Wire;
-		Color.A = (Type.bHidden || IsCategoryHidden(Type.Category)) ? 0 : (bPath ? 200 : 255);
+		Color.A = (Type.bHidden || IsCategoryHidden(Type.Category)) ? 0 : (IsPathKind(Type.Kind) ? 200 : 255);
 		PaletteData[i] = Color;
 	}
 	PaletteData[HighlightType] = FColor(226, 142, 66);
