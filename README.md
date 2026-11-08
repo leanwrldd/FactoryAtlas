@@ -5,6 +5,8 @@ A [Satisfactory](https://www.satisfactorygame.com/) mod that turns the in-game m
 Every building you own is drawn live on the map, with layers, a height filter, your own colors and
 paint, hover info, building configuration and image export. It is built to cost the game almost nothing.
 
+![Atlas on the map: buildings drawn by category, hover info, and the machine configuration panel](docs/screenshot-map.webp)
+
 Built with [SML](https://ficsit.app/mod/SML) (Satisfactory Mod Loader) 3.12 for Satisfactory 1.2.
 Mod reference: `FactoryAtlas`.
 
