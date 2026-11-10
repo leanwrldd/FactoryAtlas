@@ -46,8 +46,36 @@ namespace Atlas
 	constexpr int32 MarkerFirst = 1012;   // Collectibles, 1012 to 1017
 	constexpr int32 MarkerLast = 1017;
 	constexpr int32 OverflowType = 980;   // Shared once a game has more building types than this
+	// Status light colours live in palette slots no building or marker uses, one per status code: slot 980 + code.
+	// A status record is its building's own record with the paint bits holding the code, drawn by a second
+	// instance of the map material (StatusMode 1) as a dot in the building's corner. See create_assets.py.
+	constexpr int32 StatusColorFirst = 981;
+	constexpr int32 StatusDotPixels = 5;
+	// Buildings in the way of a measure tool copy, drawn in red over the map.
+	constexpr int32 BlockedType = 1018;
+
+	/** The game's production indicator, as a status light shows it. 0 means no light. */
+	enum class EStatusLight : uint8 { None = 0, Producing = 1, Overclocked = 2, Standby = 3, Error = 4, Count };
+
+	inline const TCHAR* StatusLightName(EStatusLight Status)
+	{
+		static const TCHAR* Names[] = { TEXT("None"), TEXT("Producing"), TEXT("Producing, overclocked"), TEXT("Standby"), TEXT("Error") };
+		return Names[FMath::Min(int32(Status), int32(EStatusLight::Count) - 1)];
+	}
+
+	inline FColor StatusLightColor(EStatusLight Status)
+	{
+		static const FColor Colors[] = { FColor(150, 155, 165), FColor(74, 222, 128), FColor(192, 132, 252), FColor(250, 204, 21), FColor(248, 113, 113) };
+		return Colors[FMath::Min(int32(Status), int32(EStatusLight::Count) - 1)];
+	}
 
 	enum class EFeature : uint8 { ResourceNodes, ResourceWells, SporeFlowers, GasPillars, Count };
+
+	/**
+	 * Where the map is drawn: the game's own map screen, or the separate map window. Each keeps its own hover,
+	 * pointer-over-panel and selection anchor, so one never clears or moves the other's.
+	 */
+	enum class EView : uint8 { Game, Window, Count };
 
 	inline const TCHAR* FeatureName(EFeature Feature)
 	{
@@ -208,6 +236,12 @@ namespace Atlas
 		const int32 CellX = FMath::Min((int32(R.X) >> 7) * GridSize / (PositionMax + 1), GridSize - 1);
 		const int32 CellY = FMath::Min((int32(R.Y) >> 7) * GridSize / (PositionMax + 1), GridSize - 1);
 		return CellY * GridSize + CellX;
+	}
+
+	/** The same record with other paint bits; a status record carries its status code there. */
+	inline FVector4f WithPaint(const FVector4f& R, int32 Paint)
+	{
+		return FVector4f(R.X, R.Y, float((int32(R.Z) & ~15) | ((Paint >> 4) & 15)), float((int32(R.W) & ~15) | (Paint & 15)));
 	}
 
 	/** True when two records are the same building, whatever its paint. */

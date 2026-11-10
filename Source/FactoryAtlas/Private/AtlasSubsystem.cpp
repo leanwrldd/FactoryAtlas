@@ -1,4 +1,6 @@
 #include "AtlasSubsystem.h"
+#include "AtlasMapWindow.h"
+#include "AtlasModConfig.h"
 
 #include "Algo/Sort.h"
 #include "Async/ParallelFor.h"
@@ -491,6 +493,7 @@ void UAtlasSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Grid = MakeShared<FGrid>();
 	PaintColors.Add(FColor::Transparent); // Index 0 means unpainted
 	LoadSettings();
+	SyncModConfig();
 }
 
 void UAtlasSubsystem::Deinitialize()
@@ -500,9 +503,14 @@ void UAtlasSubsystem::Deinitialize()
 		Job.Wait();
 		bJobActive = false;
 	}
+	CancelBeltDrag();
+	SetWiring(Wire.View, false);
+	ClearStatusLights();
 	BindBuildableDelegates(false);
 	if (Active == this)
 	{
+		// Its GPU buffers hold this world's buildings.
+		Atlas::MapWindow::Close();
 		Active = nullptr;
 	}
 	Super::Deinitialize();
@@ -805,6 +813,33 @@ void UAtlasSubsystem::SetCollectibleShown(ECollectible Kind, bool bShown)
 	SaveSettings();
 }
 
+void UAtlasSubsystem::SetSpoilersHidden(bool bHidden)
+{
+	Settings.bHideSpoilers = bHidden;
+	bPaletteDirty = true;
+	LastMarkerSeconds = -1000.0; // Refresh on the next paint
+	if (bHidden && Hover.bValid && Hover.bMarker)
+	{
+		ClearHover();
+	}
+}
+
+void UAtlasSubsystem::SyncModConfig()
+{
+	LastConfigSyncSeconds = FPlatformTime::Seconds();
+	FSettings Config = Settings;
+	if (!UAtlasModConfig::Read(this, Config))
+	{
+		return;
+	}
+	const bool bSpoilersChanged = Config.bHideSpoilers != Settings.bHideSpoilers;
+	Settings = Config;
+	if (bSpoilersChanged)
+	{
+		SetSpoilersHidden(Config.bHideSpoilers);
+	}
+}
+
 namespace
 {
 	/** Calls a reflected getter with no arguments. Reflection keeps working when a game patch moves members. */
@@ -1029,6 +1064,37 @@ bool UAtlasSubsystem::SelectHovered()
 	return false;
 }
 
+AFGBuildable* UAtlasSubsystem::FindHoveredActor()
+{
+	if (!Hover.bValid || Hover.bMarker || !Types.IsValidIndex(Hover.Type))
+	{
+		return nullptr;
+	}
+	UClass* Class = Types[Hover.Type].Class;
+	AFGBuildableSubsystem* Buildables = AFGBuildableSubsystem::Get(GetWorld());
+	if (!Class || !Buildables || !Class->IsChildOf<AFGBuildable>() || GetDefault<AFGBuildable>(Class)->ManagedByLightweightBuildableSubsystem())
+	{
+		return nullptr;
+	}
+	// Records keep no handle, so find the building whose own record is the one under the cursor.
+	const FType& Type = Types[Hover.Type];
+	for (AFGBuildable* Buildable : Buildables->GetAllBuildablesRef())
+	{
+		if (!Buildable || Buildable->GetClass() != Class)
+		{
+			continue;
+		}
+		bool bMatch = false;
+		auto Sink = [this, &bMatch](const FVector4f& Record) { bMatch |= SameBuilding(Record, Hover.Source); };
+		EmitActor(Buildable, Type, Hover.Type, 0, Sink);
+		if (bMatch)
+		{
+			return Buildable;
+		}
+	}
+	return nullptr;
+}
+
 void UAtlasSubsystem::ClearSelection()
 {
 	Selected.Reset();
@@ -1216,12 +1282,13 @@ void UAtlasSubsystem::SetSelectedPaused(bool bPaused)
 	}
 }
 
-bool UAtlasSubsystem::IsPointOnMap(const FVector2f& ScreenPosition) const
+bool UAtlasSubsystem::IsPointOnMap(const FVector2f& ScreenPosition, EView View) const
 {
-	const TSharedPtr<SWidget> Map = MapWidget.Pin();
+	const TSharedPtr<SWidget> Map = MapWidget[int32(View)].Pin();
 	if (!Map)
 	{
-		return true;
+		// The game's map tells the layer about itself only once hovered; the window registers its map up front.
+		return View == EView::Game;
 	}
 	FSlateApplication& Slate = FSlateApplication::Get();
 	const FWidgetPath Path = Slate.LocateWindowUnderMouse(FVector2D(ScreenPosition), Slate.GetInteractiveTopLevelWindows());
@@ -1561,6 +1628,8 @@ int32 UAtlasSubsystem::PaintFor(const FFactoryCustomizationData& Data)
 
 void UAtlasSubsystem::OnMapOpened()
 {
+	SyncModConfig();
+
 	// Repaints raise no event, so paint mode refreshes the whole map when it is out of date.
 	if (bPaintMode && bScanned && FPlatformTime::Seconds() - LastScanSeconds > PaintRefreshSeconds)
 	{
@@ -1579,6 +1648,7 @@ void UAtlasSubsystem::EnsureScanned()
 
 void UAtlasSubsystem::Scan()
 {
+	bPortsDirty = true;
 	AFGBuildableSubsystem* Buildables = AFGBuildableSubsystem::Get(GetWorld());
 	AFGLightweightBuildableSubsystem* Lightweights = AFGLightweightBuildableSubsystem::Get(GetWorld());
 	if (!Buildables || !Lightweights)
@@ -1661,6 +1731,7 @@ void UAtlasSubsystem::Scan()
 
 	BindBuildableDelegates(true);
 
+	bStatusDirty = true; // The lights follow the same buildings
 	bScanned = true;
 	bMenuDirty = true;
 	LastScanSeconds = FPlatformTime::Seconds();
@@ -1698,6 +1769,7 @@ void UAtlasSubsystem::FinishJob()
 		Grid = MoveTemp(PendingGrid);
 		PendingGrid.Reset();
 	}
+	GridChanges++;
 	bMenuDirty = true;
 	if (Hover.bValid)
 	{
@@ -1707,6 +1779,12 @@ void UAtlasSubsystem::FinishJob()
 
 void UAtlasSubsystem::Pump()
 {
+	// The mod settings menu raises no event we can bind to natively, so pick up its changes about once a second.
+	if (FPlatformTime::Seconds() - LastConfigSyncSeconds > 1.0)
+	{
+		SyncModConfig();
+	}
+
 	if (bJobActive && !JobRunning->load())
 	{
 		FinishJob();
@@ -1715,6 +1793,28 @@ void UAtlasSubsystem::Pump()
 	{
 		LaunchJob(nullptr);
 	}
+	UpdateStatusLights();
+}
+
+bool UAtlasSubsystem::RecordOf(AFGBuildable* Buildable, FVector4f& Out)
+{
+	const int32 TypeId = TypeFor(Buildable->GetClass());
+	const FType& Type = Types[TypeId];
+	if (Type.Kind != EKind::Box)
+	{
+		return false;
+	}
+	bool bFound = false;
+	auto Sink = [&Out, &bFound](const FVector4f& Record)
+	{
+		if (!bFound)
+		{
+			Out = Record;
+			bFound = true;
+		}
+	};
+	EmitActor(Buildable, Type, TypeId, 0, Sink);
+	return bFound;
 }
 
 void UAtlasSubsystem::QueueActor(AFGBuildable* Buildable, bool bAdded)
@@ -1742,6 +1842,17 @@ void UAtlasSubsystem::QueueActor(AFGBuildable* Buildable, bool bAdded)
 		}
 		bRecipeIconsDirty = true;
 	}
+	if (bStatusActive)
+	{
+		if (bAdded)
+		{
+			AddStatusLight(Buildable);
+		}
+		else
+		{
+			RemoveStatusLight(Buildable);
+		}
+	}
 
 	if (PendingOps.Num() > MaxQueuedOps)
 	{
@@ -1751,11 +1862,13 @@ void UAtlasSubsystem::QueueActor(AFGBuildable* Buildable, bool bAdded)
 
 void UAtlasSubsystem::OnBuildableAdded(AFGBuildable* Buildable)
 {
+	bPortsDirty = true; // A new belt connects ports and brings its own ends
 	QueueActor(Buildable, true);
 }
 
 void UAtlasSubsystem::OnBuildableRemoved(AFGBuildable* Buildable)
 {
+	bPortsDirty = true; // Removing a belt frees the ports it held
 	QueueActor(Buildable, false);
 }
 
@@ -1917,11 +2030,14 @@ void UAtlasSubsystem::SetHeightFilter(float Low, float High)
 	FilterHigh = FMath::Max(Low, High);
 }
 
-bool UAtlasSubsystem::ConsumeMenuDirty()
+uint32 UAtlasSubsystem::GetMenuVersion()
 {
-	const bool bWasDirty = bMenuDirty;
-	bMenuDirty = false;
-	return bWasDirty;
+	if (bMenuDirty)
+	{
+		bMenuDirty = false;
+		MenuVersion++;
+	}
+	return MenuVersion;
 }
 
 UTexture2D* UAtlasSubsystem::GetPalette()
@@ -1967,6 +2083,12 @@ void UAtlasSubsystem::RebuildPalette()
 	}
 	PaletteData[SporeFlowerType] = FColor(255, 110, 200, IsMarkerShown(SporeFlowerType) ? 255 : 0);
 	PaletteData[GasPillarType] = FColor(150, 230, 110, IsMarkerShown(GasPillarType) ? 255 : 0);
+	for (int32 Code = 1; Code < int32(EStatusLight::Count); Code++)
+	{
+		PaletteData[StatusColorFirst - 1 + Code] = StatusLightColor(EStatusLight(Code));
+	}
+	PaletteData[BlockedType] = FColor(235, 64, 52);
+	PaletteBuilds++;
 	for (int32 i = 1; i < PaintColors.Num(); i++)
 	{
 		FColor Color = PaintColors[i];
@@ -1997,26 +2119,30 @@ void UAtlasSubsystem::FlushPalette()
 		});
 }
 
-void UAtlasSubsystem::SetPointerOverPanel(bool bOver)
+void UAtlasSubsystem::SetPointerOverPanel(bool bOver, EView View)
 {
-	bPointerOverPanel = bOver;
+	bPointerOverPanel[int32(View)] = bOver;
 	if (bOver)
 	{
-		ClearHover();
+		ClearHover(View);
 	}
 }
 
 void UAtlasSubsystem::ResetSettings()
 {
 	Settings = FSettings();
+	SyncModConfig(); // Those toggles belong to the mod settings menu, which has its own reset
+	bPaletteDirty = true;
+	LastMarkerSeconds = -1000.0; // The collectible setting may have changed
 	SaveSettings();
 }
 
-void UAtlasSubsystem::UpdateHover(FVector2f Uv, float PixelsPerMetre)
+void UAtlasSubsystem::UpdateHover(FVector2f Uv, float PixelsPerMetre, EView View)
 {
 	Hover.bValid = false;
 	Hover.bMarker = false;
-	if (bPointerOverPanel || Uv.X < 0.f || Uv.X >= 1.f || Uv.Y < 0.f || Uv.Y >= 1.f)
+	HoverView = View;
+	if (bPointerOverPanel[int32(View)] || Uv.X < 0.f || Uv.X >= 1.f || Uv.Y < 0.f || Uv.Y >= 1.f)
 	{
 		return;
 	}
@@ -2233,16 +2359,12 @@ void UAtlasSubsystem::SaveSettings() const
 	Lines.Add(FString::Printf(TEXT("panel=%d"), bPanelOpen ? 1 : 0));
 	Lines.Add(FString::Printf(TEXT("fullscreen=%d"), bFullscreen ? 1 : 0));
 	Lines.Add(FString::Printf(TEXT("appearance=%d"), bAppearanceOpen ? 1 : 0));
-	Lines.Add(FString::Printf(TEXT("hoverLabel=%d"), Settings.bHoverLabel ? 1 : 0));
-	Lines.Add(FString::Printf(TEXT("hoverHeight=%d"), Settings.bHoverHeight ? 1 : 0));
-	Lines.Add(FString::Printf(TEXT("hoverCoordinates=%d"), Settings.bHoverCoordinates ? 1 : 0));
-	Lines.Add(FString::Printf(TEXT("highlight=%d"), Settings.bHighlight ? 1 : 0));
-	Lines.Add(FString::Printf(TEXT("outlines=%d"), Settings.bOutlines ? 1 : 0));
 	Lines.Add(FString::Printf(TEXT("opacity=%.2f"), Settings.Opacity));
 	Lines.Add(FString::Printf(TEXT("exportSize=%d"), Settings.ExportSize));
 	Lines.Add(FString::Printf(TEXT("radiation=%d"), Settings.bRadiation ? 1 : 0));
-	Lines.Add(FString::Printf(TEXT("recipeIcons=%d"), Settings.bRecipeIcons ? 1 : 0));
 	Lines.Add(FString::Printf(TEXT("zoom=%d"), Settings.ZoomFactor));
+	Lines.Add(FString::Printf(TEXT("beltTier=%d"), Settings.BeltTierFromTop));
+	Lines.Add(FString::Printf(TEXT("pipeTier=%d"), Settings.PipeTierFromTop));
 	Lines.Add(FString::Printf(TEXT("collectibles=%u"), CollectibleMask));
 	Lines.Add(FString::Printf(TEXT("features=%u"), FeatureMask));
 	for (const FString& Path : HiddenResourcePaths)
@@ -2294,19 +2416,15 @@ void UAtlasSubsystem::LoadSettings()
 		else if (Key == TEXT("panel")) { bPanelOpen = Value == TEXT("1"); }
 		else if (Key == TEXT("fullscreen")) { bFullscreen = Value == TEXT("1"); }
 		else if (Key == TEXT("appearance")) { bAppearanceOpen = Value == TEXT("1"); }
-		else if (Key == TEXT("hoverLabel")) { Settings.bHoverLabel = Value == TEXT("1"); }
-		else if (Key == TEXT("hoverHeight")) { Settings.bHoverHeight = Value == TEXT("1"); }
-		else if (Key == TEXT("hoverCoordinates")) { Settings.bHoverCoordinates = Value == TEXT("1"); }
-		else if (Key == TEXT("highlight")) { Settings.bHighlight = Value == TEXT("1"); }
-		else if (Key == TEXT("outlines")) { Settings.bOutlines = Value == TEXT("1"); }
 		else if (Key == TEXT("opacity")) { Settings.Opacity = FMath::Clamp(FCString::Atof(*Value), 0.2f, 1.f); }
 		else if (Key == TEXT("exportSize")) { Settings.ExportSize = FCString::Atoi(*Value) == 4096 ? 4096 : 8192; }
 		else if (Key == TEXT("radiation")) { Settings.bRadiation = Value == TEXT("1"); }
-		else if (Key == TEXT("recipeIcons")) { Settings.bRecipeIcons = Value == TEXT("1"); }
 		else if (Key == TEXT("collectibles")) { CollectibleMask = uint32(FCString::Atoi(*Value)) & ((1u << int32(ECollectible::Count)) - 1); }
 		else if (Key == TEXT("features")) { FeatureMask = uint32(FCString::Atoi(*Value)) & ((1u << int32(EFeature::Count)) - 1); }
 		else if (Key == TEXT("hiddenResource")) { HiddenResourcePaths.Add(Value); }
 		else if (Key == TEXT("zoom")) { Settings.ZoomFactor = FMath::Clamp(FCString::Atoi(*Value), 1, 8); }
+		else if (Key == TEXT("beltTier")) { Settings.BeltTierFromTop = FMath::Clamp(FCString::Atoi(*Value), 0, 16); }
+		else if (Key == TEXT("pipeTier")) { Settings.PipeTierFromTop = FMath::Clamp(FCString::Atoi(*Value), 0, 16); }
 		else if (Key == TEXT("hiddenType")) { HiddenTypePaths.Add(Value); }
 		else if (Key == TEXT("typeColor") || Key == TEXT("categoryColor"))
 		{

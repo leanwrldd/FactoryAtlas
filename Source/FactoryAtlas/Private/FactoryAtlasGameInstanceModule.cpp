@@ -2,6 +2,7 @@
 
 #include "AtlasMapHud.h"
 #include "AtlasMapLayer.h"
+#include "AtlasModConfig.h"
 #include "Engine/Engine.h"
 #include "FactoryAtlas.h"
 #include "Patching/WidgetBlueprintHookManager.h"
@@ -10,6 +11,7 @@ UFactoryAtlasGameInstanceModule::UFactoryAtlasGameInstanceModule()
 {
 	// Without this SML never instantiates a native module, and silently so.
 	bRootModule = true;
+	ModConfigurations.Add(UAtlasModConfig::StaticClass());
 }
 
 void UFactoryAtlasGameInstanceModule::DispatchLifecycleEvent(ELifecyclePhase Phase)

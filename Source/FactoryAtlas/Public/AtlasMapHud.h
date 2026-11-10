@@ -21,6 +21,12 @@ public:
 	 */
 	void UpdateFullscreen(bool bWanted);
 
+	/**
+	 * The same layer menu, configure panel, hover label and shortcuts for the separate map window, which lays it
+	 * over its own map. Clicks on that map are handled as on the game's.
+	 */
+	static TSharedRef<SWidget> MakeWindowHud();
+
 protected:
 	virtual TSharedRef<SWidget> RebuildWidget() override;
 	virtual void ReleaseSlateResources(bool bReleaseChildren) override;

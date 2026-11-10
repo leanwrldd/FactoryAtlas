@@ -1,20 +1,16 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "AtlasMapPainter.h"
 #include "AtlasTypes.h"
 #include "Blueprint/UserWidget.h"
-#include "Rendering/RenderingCommon.h"
-#include "Rendering/SlateResourceHandle.h"
 #include "AtlasMapLayer.generated.h"
 
 class UAtlasSubsystem;
-class UMaterialInstanceDynamic;
-class UTexture2D;
-struct FSlateBrush;
 
 /**
- * Draws every building as one instanced quad, inside the map's own zoom and scroll containers.
- * GPU buffers exist only while the map is on screen, one per map cell.
+ * The Atlas map inside the game's map screen, in the map's own zoom and scroll containers. Drawing is done by
+ * FAtlasMapPainter; this widget works out where the map is, the hover, and the game's zoom limit.
  */
 UCLASS(NotBlueprintable)
 class FACTORYATLAS_API UAtlasMapLayer : public UUserWidget
@@ -30,66 +26,18 @@ protected:
 		FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
 
 private:
-	struct FCellBuffer
-	{
-		TSharedPtr<ISlateUpdatableInstanceBuffer> Buffer;
-		uint32 Version = 0;
-		int32 NumInstances = 0;
-	};
-
-	bool EnsureMaterial(UAtlasSubsystem& Atlas);
-	void Upload(UAtlasSubsystem& Atlas);
-	void UpdateParameters(UAtlasSubsystem& Atlas);
 	void UpdateHover(UAtlasSubsystem& Atlas, const FGeometry& Geometry, float PixelsPerMetre);
-	void UpdateRadiation(UAtlasSubsystem& Atlas);
 	void ApplyZoomLimit(int32 Factor);
+
+	FAtlasMapPainter Painter;
 
 	/** Widget_Map and Widget_MapContainer, which own the zoom limit. */
 	TArray<TWeakObjectPtr<UUserWidget>> ZoomOwners;
 	int32 AppliedZoomFactor = 0;
 
-	TSharedPtr<ISlateUpdatableInstanceBuffer> RadiationBuffer;
-	uint32 RadiationVersion = 0;
-	int32 RadiationCount = 0;
-
-	TSharedPtr<ISlateUpdatableInstanceBuffer> SelectionBuffer;
-	FVector4f SelectionRecord = FVector4f::Zero();
-
-	void UpdateMarkers(UAtlasSubsystem& Atlas);
-
-	/** Draws each production building's recipe icon on top of it once the map is zoomed in far enough. Returns the top layer used. */
-	int32 PaintRecipeIcons(UAtlasSubsystem& Atlas, FSlateWindowElementList& OutDrawElements, int32 LayerId,
-		FVector2f Origin, FVector2f Scale, float PixelsPerMetre, const FSlateRect& CullingRect);
-	const FSlateBrush* IconBrush(UTexture2D* Icon);
-	TMap<UTexture2D*, TSharedPtr<FSlateBrush>> IconBrushes;
-	UPROPERTY(Transient)
-	TArray<TObjectPtr<UTexture2D>> IconTextures;
-	TSharedPtr<ISlateUpdatableInstanceBuffer> MarkerBuffer;
-	uint32 MarkerVersion = 0;
-	int32 MarkerCount = 0;
-
-	UPROPERTY(Transient)
-	TObjectPtr<UMaterialInstanceDynamic> Material;
-
-	TSharedPtr<FSlateBrush> Brush;
-	FSlateResourceHandle MaterialHandle;
-
-	TArray<FCellBuffer> Cells;
-	TSharedPtr<ISlateUpdatableInstanceBuffer> HighlightBuffer;
-	FVector4f HighlightRecord = FVector4f::Zero();
-	bool bHighlightReady = false;
-	bool bMaterialFailed = false;
-
-	float AppliedLow = -1e30f;
-	float AppliedHigh = -1e30f;
-	int32 AppliedPaint = -1;
-	int32 AppliedOutlines = -1;
-	float AppliedOpacity = -1.f;
+	/** Widget_Map's mMap image, whose brush the separate map window borrows. */
+	TWeakObjectPtr<class UImage> MapImage;
 
 	FVector2f LastCursor = FVector2f(-1.f, -1.f);
 	double LastHoverSeconds = 0.0;
-
-	double PaintSeconds = 0.0;
-	int32 PaintFrames = 0;
-	int64 PeakInstances = 0;
 };

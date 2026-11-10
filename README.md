@@ -32,8 +32,24 @@ Mod reference: `FactoryAtlas`.
 - Higher zoom limit than the base game (up to 8x)
 - Fullscreen mode: the map fills the whole map screen, without the game's window frame and filter list
 - Export the map as a PNG image (4096 or 8192 px)
+- Status lights (optional): a light in each machine's corner, green producing, purple overclocked,
+  yellow standby, red error
+- A second window with the whole map in it, for a second monitor
+- Spoiler-free option that hides collectibles, resources and hazards
 
-Settings are saved between sessions. The menu sits on the right of the map screen.
+**Building from the map** (single player and host)
+- Power wires: Alt + W, then click one building and another to connect them, or the ground for a pole
+- Belts, pipes, hypertubes and railway: drag from a free port to another port or to the ground
+- Built through the game's own holograms, so limits and costs are the build gun's
+
+**Measuring**
+- Press G and drag a box: size in metres and foundations, floors and height range, snapped to the
+  foundation grid even on rotated builds
+- Tile copies of the box to see where a build can be repeated; copies that hit existing buildings turn red
+- Shift + drag for a straight line
+
+Settings are saved between sessions. The menu sits on the right of the map screen, and display
+options are under Mods > Atlas in the game's settings.
 
 ## How it stays light
 
@@ -61,6 +77,8 @@ In testing, a million extra buildings drawn at full zoom out cost about 0.3 ms o
 ## Console commands
 
 - `atlas.Stress <count>` adds fake buildings to test performance. `0` removes them.
+- `Atlas.Window` opens or closes the map in a separate window.
+- `atlas.StatusDump` logs every machine's status by type, and whether the status lights agree with it.
 
 ## Building
 

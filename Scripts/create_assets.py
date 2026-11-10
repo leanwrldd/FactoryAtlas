@@ -37,31 +37,44 @@ mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
 mat.set_editor_property("num_customized_u_vs", 4)
 
 # Field layout is documented in AtlasTypes.h.
+#
+# StatusMode 1 is the status light material instance. Its records are building records whose paint bits hold a
+# status code (1 producing, 2 overclocked, 3 standby, 4 error, colours at palette slot 980 + code). Each is drawn
+# as a dot of fixed pixel size inside its building's +X +Y corner, turning with the building. It keeps the
+# building's height filter and layer visibility, and drops codes 1 and 2 once the building is smaller on screen
+# than the dot, so zoomed out only the problem lights stay. The radius matches StatusDotPixels in AtlasTypes.h.
+STATUS_RADIUS = 5.0
 DECODE = """
 float hx = floor(B.x / 8192.0);
 float hy = fmod(floor(B.x / 16.0), 512.0);
 float type = fmod(floor(B.y / 16.0), 1024.0);
-float circle = abs(type - 1021.0) < 0.5 ? 1.0 : 0.0;
-float marker = (type > 980.5 && type < 1017.5) ? 1.0 : 0.0;
+float st = StatusMode > 0.5 ? 1.0 : 0.0;
+float circle = (st < 0.5 && abs(type - 1021.0) < 0.5) ? 1.0 : 0.0;
+float marker = (st < 0.5 && type > 980.5 && type < 1017.5) ? 1.0 : 0.0;
 float unit = circle > 0.5 ? 0.4 : 0.1;
 float ppm = abs(S.x) / 7500.0;
-float2 ph = marker > 0.5 ? float2(hx, hy) : max(float2(hx, hy) * unit * ppm, 0.5);
+float2 bh = max(float2(hx, hy) * 0.1 * ppm, 0.5);
+float2 ph = st > 0.5 ? float2(SR, SR) : (marker > 0.5 ? float2(hx, hy) : max(float2(hx, hy) * unit * ppm, 0.5));
 float2 ext = ph + 1.0;
 float zv = fmod(A.x, 128.0) * 128.0 + fmod(A.y, 128.0);
 float paint = fmod(B.x, 16.0) * 16.0 + fmod(B.y, 16.0);
 float4 tc = Pal.SampleLevel(PalSampler, float2((type + 0.5) / 1024.0, 0.25), 0.0);
 float4 pc = Pal.SampleLevel(PalSampler, float2((paint + 0.5) / 1024.0, 0.75), 0.0);
-float vis = (tc.a > 0.5 && (type > 980.5 || (zv >= ZMin && zv <= ZMax))) ? 1.0 : 0.0;
-float3 color = (PaintMode > 0.5 && paint > 0.5 && type < 980.5) ? pc.rgb : tc.rgb;
+float4 sc = Pal.SampleLevel(PalSampler, float2((980.0 + paint + 0.5) / 1024.0, 0.25), 0.0);
+float lit = st < 0.5 ? 1.0 : ((paint > 0.5 && (paint > 2.5 || min(bh.x, bh.y) >= SR)) ? 1.0 : 0.0);
+float vis = (lit > 0.5 && tc.a > 0.5 && (type > 980.5 || (zv >= ZMin && zv <= ZMax))) ? 1.0 : 0.0;
+float3 color = st > 0.5 ? sc.rgb : ((PaintMode > 0.5 && paint > 0.5 && type < 980.5) ? pc.rgb : tc.rgb);
 float hollow = marker * fmod(paint, 2.0);
 // Path pieces (belts, pipes, rails, roads, wires) have palette alpha 200 rather than 255; see RebuildPalette.
-float path = (tc.a > 0.5 && tc.a < 0.9) ? 1.0 : 0.0;
-"""
+float path = (st < 0.5 && tc.a > 0.5 && tc.a < 0.9) ? 1.0 : 0.0;
+// A status dot sits inside its building's corner, or in the middle once the building is smaller than the dot.
+float2 off = st > 0.5 ? max(bh - SR - 1.5, 0.0) : float2(0.0, 0.0);
+""".replace("SR", f"{STATUS_RADIUS:.1f}")
 
 CODE_POSITION = DECODE + """
 float2 uv = float2(floor(A.x / 128.0), floor(A.y / 128.0)) / 131071.0;
 float ang = floor(B.y / 16384.0) / 1024.0 * 6.28318531;
-float2 L = C * ext * vis;
+float2 L = (C * ext + off) * vis;
 float cs = cos(ang);
 float sn = sin(ang);
 float2 P = O + S * uv + float2(L.x * cs - L.y * sn, L.x * sn + L.y * cs);
@@ -71,7 +84,7 @@ return float3(P, 0.0);
 CODE_LOCAL = DECODE + "return C * ext;"
 CODE_HALF = DECODE + "return ph;"
 CODE_COLOR_RG = DECODE + "return color.rg;"
-CODE_COLOR_B = DECODE + "return float2(color.b, circle + marker * (2.0 + hollow) - path);"
+CODE_COLOR_B = DECODE + "return float2(color.b, circle + (marker + st) * (2.0 + hollow) - path);"
 
 CODE_COLOR = """
 float3 c = float3(RG.x, RG.y, BA.x);
@@ -146,9 +159,11 @@ zmin, zmax = param("ZMin", 0.0), param("ZMax", 16383.0)
 paint_mode = param("PaintMode", 0.0)
 outlines = param("Outlines", 1.0)
 opacity = param("Opacity", 1.0)
+status_mode = param("StatusMode", 0.0)
 palette = node(unreal.MaterialExpressionTextureObjectParameter, parameter_name="Palette",
                texture=unreal.load_asset("/Engine/EngineResources/WhiteSquareTexture"))
-vs = {"S": scale, "O": offset, "C": corner, "A": a, "B": b, "ZMin": zmin, "ZMax": zmax, "PaintMode": paint_mode, "Pal": palette}
+vs = {"S": scale, "O": offset, "C": corner, "A": a, "B": b, "ZMin": zmin, "ZMax": zmax, "PaintMode": paint_mode,
+      "StatusMode": status_mode, "Pal": palette}
 
 position = custom("Instance to window position", CODE_POSITION, Out.CMOT_FLOAT3, vs)
 local = custom("Pixel offset from centre", CODE_LOCAL, Out.CMOT_FLOAT2, vs)

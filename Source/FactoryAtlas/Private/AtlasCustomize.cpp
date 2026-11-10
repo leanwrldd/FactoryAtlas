@@ -993,12 +993,54 @@ void UAtlasSubsystem::CopySelected()
 	{
 		Parts.Add(TEXT("material"));
 	}
+	CopiedClass = SelectionClass();
+	CopiedCategory = CopiedClass ? Types[TypeFor(CopiedClass)].Category : ECategory::Other;
+	bCopiedSettings = (PlayerState && CanUseFactoryClipboard(Actor)) || CopiedRecipe || CopiedClock.IsSet();
 	ClipboardStatus = JoinParts(TEXT("Copied"), Parts);
+}
+
+UClass* UAtlasSubsystem::SelectionClass() const
+{
+	if (bSelectedLightweight)
+	{
+		return SelectedLightweight.GetBuildableClass().Get();
+	}
+	const AFGBuildable* Actor = Selected.Get();
+	return Actor ? Actor->GetClass() : nullptr;
+}
+
+bool UAtlasSubsystem::PasteFitsSelection() const
+{
+	// A constructor's color doesn't belong on a foundation. The same building always takes it. A machine's copy
+	// also goes wherever the game's own clipboard accepts it. A copy that is only a look, from a foundation, wall,
+	// belt and the like, goes onto anything of the same map category: one foundation onto another size of foundation.
+	UClass* Target = SelectionClass();
+	if (!Target || !CopiedClass)
+	{
+		return false;
+	}
+	if (Target == CopiedClass)
+	{
+		return true;
+	}
+	if (bCopiedSettings)
+	{
+		AFGBuildable* Actor = bSelectedLightweight ? nullptr : Selected.Get();
+		return FactoryClipboardHolds(LocalPlayerState(GetWorld()), Actor);
+	}
+	const int32* Type = TypeIndex.Find(Target);
+	if (!Type || !Types.IsValidIndex(*Type) || Types[*Type].Category != CopiedCategory)
+	{
+		return false;
+	}
+	// A machine has settings of its own, so it never takes a look-only copy from something else.
+	AFGBuildable* Actor = bSelectedLightweight ? nullptr : Selected.Get();
+	return !CanUseFactoryClipboard(Actor);
 }
 
 bool UAtlasSubsystem::CanPasteToSelected() const
 {
-	if (!HasSelection())
+	if (!HasSelection() || !PasteFitsSelection())
 	{
 		return false;
 	}
@@ -1013,6 +1055,13 @@ void UAtlasSubsystem::PasteToSelected()
 {
 	if (!HasSelection())
 	{
+		return;
+	}
+	if (!PasteFitsSelection())
+	{
+		CustomizeError = CopiedClass
+			? FText::Format(FText::FromString(TEXT("Copied from a {0}; that doesn't paste onto this.")), Types[TypeFor(CopiedClass)].Name)
+			: FText::FromString(TEXT("Nothing copied."));
 		return;
 	}
 	AFGBuildable* Actor = bSelectedLightweight ? nullptr : Selected.Get();
