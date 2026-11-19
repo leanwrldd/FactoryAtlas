@@ -2210,7 +2210,12 @@ const TArray<FRecipeIcon>& UAtlasSubsystem::GetRecipeIcons()
 			It.RemoveCurrent();
 			continue;
 		}
-		UClass* Recipe = Building->GetCurrentRecipe().Get();
+		// Reflection, not the inline GetCurrentRecipe(): the inline getter reads mCurrentRecipe at a compiled-in
+		// offset, and CL 520140 moved it (AFGBuildableFactory gained a base and a member), so a stale build
+		// read garbage there and crashed in TSubclassOf's IsChildOf check.
+		TSubclassOf<UFGRecipe> CurrentRecipe;
+		CallGetter(Building, TEXT("GetCurrentRecipe"), CurrentRecipe);
+		UClass* Recipe = CurrentRecipe.Get();
 		const int32* TypeId = Recipe ? TypeIndex.Find(Building->GetClass()) : nullptr;
 		if (!TypeId)
 		{
